@@ -18,6 +18,11 @@ class VulkanBlur {
     }
 
     @Synchronized
+    fun setBlurRadius(radius: Float) {
+        if (handle != 0L) nativeSetRadius(handle, radius)
+    }
+
+    @Synchronized
     fun info(): String = if (handle != 0L) nativeInfo(handle) else ""
 
     @Synchronized
@@ -34,6 +39,7 @@ class VulkanBlur {
 
     private external fun nativeCreate(surface: Surface, enableValidation: Boolean): Long
     private external fun nativeResize(handle: Long, width: Int, height: Int): Unit
+    private external fun nativeSetRadius(handle: Long, radius: Float): Unit
     private external fun nativeInfo(handle: Long): String
     private external fun nativeDestroy(handle: Long)
 

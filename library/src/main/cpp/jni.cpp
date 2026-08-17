@@ -43,6 +43,18 @@ Java_com_vulkanfx_blur_VulkanBlur_nativeResize(JNIEnv* env, jobject, jlong handl
     }
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_vulkanfx_blur_VulkanBlur_nativeSetRadius(JNIEnv* env, jobject, jlong handle, jfloat radius) {
+    VulkanContext* ctx = fromHandle(handle);
+    if (!ctx) {
+        throwState(env, "native handle is null");
+        return;
+    }
+    if (!ctx->setRadius(radius)) {
+        throwState(env, ctx->lastError().empty() ? "setRadius failed" : ctx->lastError().c_str());
+    }
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_vulkanfx_blur_VulkanBlur_nativeInfo(JNIEnv* env, jobject, jlong handle) {
     VulkanContext* ctx = fromHandle(handle);

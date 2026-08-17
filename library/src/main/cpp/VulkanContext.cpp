@@ -96,8 +96,7 @@ const char* presentModeName(VkPresentModeKHR m) {
 
 constexpr uint32_t kTestSize = 256;
 constexpr uint32_t kTestCell = 32;
-constexpr uint32_t kDownPasses = 3;
-constexpr float kDownOffset = 1.0f;
+constexpr float kDefaultRadius = 24.0f;
 
 std::vector<VkLayerProperties> instanceLayers() {
     uint32_t n = 0;
@@ -213,7 +212,7 @@ bool VulkanContext::init(ANativeWindow* window, bool enableValidation) {
     if (!createSyncObjects()) return false;
     if (!createTestTexture()) return false;
     if (!uploadTestTexture()) return false;
-    if (!blur_.create(device_, physical_, testImage_, kDownPasses, kDownOffset, cmdBarrier2_, &error_)) {
+    if (!blur_.create(device_, physical_, testImage_, kDefaultRadius, cmdBarrier2_, &error_)) {
         return false;
     }
     if (!blur_.execute(cmd_, queue_, &error_)) return false;
@@ -745,14 +744,22 @@ bool VulkanContext::resize(uint32_t width, uint32_t height) {
     return presentTest();
 }
 
+bool VulkanContext::setRadius(float radius) {
+    if (radius == blur_.radius()) return true;
+    vkDeviceWaitIdle(device_);
+    if (!blur_.setRadius(radius, testImage_, &error_)) return false;
+    if (!blur_.execute(cmd_, queue_, &error_)) return false;
+    return presentTest();
+}
+
 std::string VulkanContext::info() const {
     const int w = window_ ? ANativeWindow_getWidth(window_) : 0;
     const int h = window_ ? ANativeWindow_getHeight(window_) : 0;
     const bool timestamps = props_.limits.timestampComputeAndGraphics == VK_TRUE &&
                             props_.limits.timestampPeriod > 0.0f;
     std::string s;
-    s += "VulkanBlur Phase 7\n";
-    s += "status=dual-kawase\n";
+    s += "VulkanBlur Phase 8\n";
+    s += "status=radius\n";
     s += "device=";
     s += props_.deviceName;
     s += "\n";
@@ -800,6 +807,15 @@ std::string VulkanContext::info() const {
     s += "x";
     s += std::to_string(testImage_.height);
     s += " R8G8B8A8_UNORM checker\n";
+    s += "radius=";
+    s += std::to_string(blur_.radius());
+    s += "\n";
+    s += "passes=";
+    s += std::to_string(blur_.passes());
+    s += "\n";
+    s += "offset=";
+    s += std::to_string(blur_.offset());
+    s += "\n";
     s += "pyramid=";
     s += blur_.pyramidInfo();
     s += "\n";

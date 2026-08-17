@@ -15,6 +15,12 @@ class VulkanBlurView @JvmOverloads constructor(
 
     var onStatus: ((String) -> Unit)? = null
 
+    var blurRadius: Float = 24f
+        set(value) {
+            field = value
+            if (blur.isReady) applyRadius()
+        }
+
     private val blur = VulkanBlur()
 
     init {
@@ -30,8 +36,8 @@ class VulkanBlurView @JvmOverloads constructor(
         }
         try {
             val debug = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
-            val info = blur.attach(surface, enableValidation = debug)
-            onStatus?.invoke(info)
+            blur.attach(surface, enableValidation = debug)
+            applyRadius()
         } catch (e: IllegalStateException) {
             Log.e(TAG, "Vulkan init failed", e)
             onStatus?.invoke("VulkanBlur init failed:\n${e.message}")
@@ -52,6 +58,16 @@ class VulkanBlurView @JvmOverloads constructor(
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         blur.detach()
+    }
+
+    private fun applyRadius() {
+        try {
+            blur.setBlurRadius(blurRadius)
+            onStatus?.invoke(blur.info())
+        } catch (e: IllegalStateException) {
+            Log.e(TAG, "Vulkan setRadius failed", e)
+            onStatus?.invoke("VulkanBlur setRadius failed:\n${e.message}")
+        }
     }
 
     private companion object {

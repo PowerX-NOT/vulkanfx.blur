@@ -2,6 +2,7 @@
 
 #include <android/log.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <string>
 
@@ -24,6 +25,33 @@ struct KawasePush {
     float resX, resY;
 };
 static_assert(sizeof(KawasePush) == 24, "push constant layout");
+
+struct KawaseMapped {
+    uint32_t passes;
+    float offset;
+};
+
+// Dual Kawase: each extra level doubles source-space kernel (~2^levels px).
+// floor(log2(r)) matches 5→2, 10→3, 20→4, 40→5. Fractional log2 scales offset in [1,2).
+// ponytail: cap 6 levels; bigger radius only raises offset, not more mips.
+KawaseMapped mapRadius(float radius, uint32_t minDim) {
+    uint32_t maxPasses = 0;
+    for (uint32_t d = minDim; d > 1 && maxPasses < 6; d /= 2) ++maxPasses;
+    if (maxPasses < 1) maxPasses = 1;
+    const float lg = std::log2(std::max(radius, 1.0f));
+    uint32_t passes = static_cast<uint32_t>(std::floor(lg));
+    if (passes < 1) passes = 1;
+    if (passes > maxPasses) passes = maxPasses;
+    return {passes, 1.0f + (lg - std::floor(lg))};
+}
+
+void checkRadiusMap() {
+    if (mapRadius(5, 256).passes != 2 || mapRadius(10, 256).passes != 3 ||
+        mapRadius(20, 256).passes != 4 || mapRadius(40, 256).passes != 5 ||
+        mapRadius(1, 256).passes != 1) {
+        LOGE("mapRadius self-check failed");
+    }
+}
 
 #define KB_TRY(expr)                                                       \
     do {                                                                   \
@@ -82,7 +110,6 @@ bool KawaseBlur::createComputePipeline(const uint32_t* spv, size_t bytes, VkPipe
     vkDestroyShaderModule(device_, module, nullptr);
     if (pipe != VK_SUCCESS) {
         if (error) *error = "vkCreateComputePipelines failed";
-        if (error) *error = "vkCreateComputePipelines failed";
         LOGE("vkCreateComputePipelines failed");
         return false;
     }
@@ -113,18 +140,18 @@ void KawaseBlur::writeSet(VkDescriptorSet set, VkImageView src, VkImageView dst)
 }
 
 bool KawaseBlur::create(VkDevice device, VkPhysicalDevice physical, const VulkanImage& src,
-                        uint32_t passes, float offset, PFN_vkCmdPipelineBarrier2 cmdBarrier2,
-                        std::string* error) {
+                        float radius, PFN_vkCmdPipelineBarrier2 cmdBarrier2, std::string* error) {
     destroy();
-    if (passes == 0) {
-        if (error) *error = "KawaseBlur requires at least one pass";
-        return false;
-    }
+    checkRadiusMap();
+    const KawaseMapped mapped = mapRadius(radius, std::min(src.width, src.height));
+    const uint32_t passes = mapped.passes;
     device_ = device;
+    physical_ = physical;
     cmdBarrier2_ = cmdBarrier2;
     srcW_ = src.width;
     srcH_ = src.height;
-    offset_ = offset;
+    radius_ = radius;
+    offset_ = mapped.offset;
 
     VkFormatProperties fmt{};
     vkGetPhysicalDeviceFormatProperties(physical, VK_FORMAT_R8G8B8A8_UNORM, &fmt);
@@ -234,7 +261,22 @@ bool KawaseBlur::create(VkDevice device, VkPhysicalDevice physical, const Vulkan
         const VulkanImage& in = (i == 0) ? downImages_.back() : upImages_[i - 1];
         writeSet(upSets_[i], in.view, upImages_[i].view);
     }
+    LOGI("kawase radius=%.1f passes=%u offset=%.2f", radius_, passes, offset_);
     return true;
+}
+
+bool KawaseBlur::setRadius(float radius, const VulkanImage& src, std::string* error) {
+    if (device_ == VK_NULL_HANDLE) {
+        if (error) *error = "KawaseBlur::setRadius before create";
+        return false;
+    }
+    const KawaseMapped mapped = mapRadius(radius, std::min(src.width, src.height));
+    if (mapped.passes == downImages_.size() && src.width == srcW_ && src.height == srcH_) {
+        radius_ = radius;
+        offset_ = mapped.offset;
+        return true;
+    }
+    return create(device_, physical_, src, radius, cmdBarrier2_, error);
 }
 
 bool KawaseBlur::execute(VkCommandBuffer cmd, VkQueue queue, std::string* error) {

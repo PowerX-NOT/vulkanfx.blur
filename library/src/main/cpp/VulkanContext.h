@@ -18,6 +18,7 @@ public:
 
     std::string info() const;
     bool resize(uint32_t width, uint32_t height);
+    bool setRadius(float radius);
     const std::string& lastError() const { return error_; }
 
 private:
