@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <declare-styleable name="VulkanBlurView">
+        <attr name="blurRadius" format="dimension" />
+        <attr name="layerAlpha" format="float" />
+        <attr name="blurAlpha" format="float" />
+        <attr name="blurScale" format="float" />
+        <attr name="autoCapture" format="boolean" />
+        <attr name="glassRimEnabled" format="boolean" />
+    </declare-styleable>
+</resources>

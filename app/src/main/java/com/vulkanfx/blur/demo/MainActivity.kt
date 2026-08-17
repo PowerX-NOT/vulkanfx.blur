@@ -272,7 +272,6 @@ class MainActivity : Activity() {
             if (enableGlassRimToggle) {
                 glassRimEnabled = showGlassRim
             }
-            autoCapture = true
             onStatus = { deviceInfo.text = it }
         }
         if (blurRegions.isNotEmpty()) {

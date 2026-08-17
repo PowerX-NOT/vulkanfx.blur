@@ -52,16 +52,13 @@ object DemoScene {
         return cardTemplates.mapIndexed { index, template ->
             val (dx, dy) = motion[index]
             BlurRegion(
-                blurRadius = blurRadius,
-                cornerRadiusTL = template.cornerRadius * cr,
-                cornerRadiusTR = template.cornerRadius * cr,
-                cornerRadiusBL = template.cornerRadius * cr,
-                cornerRadiusBR = template.cornerRadius * cr,
-                alpha = template.alpha,
                 left = ((template.left + dx) * sx).toInt(),
                 top = ((template.top + dy) * sy).toInt(),
                 right = ((template.right + dx) * sx).toInt(),
                 bottom = ((template.bottom + dy) * sy).toInt(),
+                blurRadius = blurRadius,
+                cornerRadius = template.cornerRadius * cr,
+                alpha = template.alpha,
             )
         }
     }

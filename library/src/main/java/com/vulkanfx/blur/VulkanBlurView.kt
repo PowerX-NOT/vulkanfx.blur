@@ -10,13 +10,14 @@ import android.util.Log
 import android.view.Choreographer
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.view.View
 import android.view.ViewTreeObserver
 
 /**
- * SurfaceView host for [VulkanBlur].
+ * Drop this over your UI. It blurs whatever is behind it.
  *
- * Provide content with [setInputBitmap], or set [autoCapture] to snapshot the
- * window layers behind this view each frame (AOSP blurInput).
+ * XML: `<com.vulkanfx.blur.VulkanBlurView … app:blurRadius="24dp" />`
+ * Code: `VulkanBlurView(context)` — auto-captures, radius 24.
  */
 class VulkanBlurView @JvmOverloads constructor(
     context: Context,
@@ -92,11 +93,10 @@ class VulkanBlurView @JvmOverloads constructor(
         }
 
     /**
-     * Snapshot window layers behind this view each frame and feed them to the blur
-     * (AOSP RenderEngine `blurInput` / Magnifier PixelCopy). Does not capture other apps;
-     * that path is SurfaceFlinger `setBackgroundBlurRadius`.
+     * Snapshot window layers behind this view each frame.
+     * On by default. [setInputBitmap] turns it off.
      */
-    var autoCapture: Boolean = false
+    var autoCapture: Boolean = true
         set(value) {
             if (field == value) return
             field = value
@@ -201,6 +201,7 @@ class VulkanBlurView @JvmOverloads constructor(
     init {
         holder.setFormat(PixelFormat.RGBA_8888)
         holder.addCallback(this)
+        applyAttrs(attrs)
     }
 
     /** Convenience constructor matching the conceptual `VulkanBlurView(blurRadius = …)` API. */
@@ -208,7 +209,67 @@ class VulkanBlurView @JvmOverloads constructor(
         this.blurRadius = blurRadius
     }
 
+    /** Blur the area of [view] (window coords mapped into the captured input). */
+    fun regionFor(
+        view: View,
+        blurRadius: Int = this.blurRadius.toInt(),
+        cornerRadius: Float = 0f,
+        alpha: Float = 1f,
+    ): BlurRegion {
+        val hostLoc = IntArray(2)
+        val viewLoc = IntArray(2)
+        getLocationInWindow(hostLoc)
+        view.getLocationInWindow(viewLoc)
+        val srcW = width.coerceAtLeast(1)
+        val srcH = height.coerceAtLeast(1)
+        val (cw, ch) = VulkanBlur.captureSize(srcW, srcH)
+        val sx = cw / srcW.toFloat()
+        val sy = ch / srcH.toFloat()
+        val l = viewLoc[0] - hostLoc[0]
+        val t = viewLoc[1] - hostLoc[1]
+        return BlurRegion(
+            left = (l * sx).toInt(),
+            top = (t * sy).toInt(),
+            right = ((l + view.width) * sx).toInt(),
+            bottom = ((t + view.height) * sy).toInt(),
+            blurRadius = blurRadius,
+            cornerRadius = cornerRadius,
+            alpha = alpha,
+        )
+    }
+
+    /** Feed your own pixels. Turns [autoCapture] off. */
     fun setInputBitmap(bitmap: Bitmap) {
+        if (autoCapture) autoCapture = false
+        uploadInput(bitmap)
+    }
+
+    fun requestRender() = maybeRequestRender()
+
+    private fun applyAttrs(attrs: AttributeSet?) {
+        if (attrs == null) return
+        val a = context.obtainStyledAttributes(attrs, R.styleable.VulkanBlurView)
+        try {
+            if (a.hasValue(R.styleable.VulkanBlurView_blurRadius)) {
+                blurRadius = a.getDimension(R.styleable.VulkanBlurView_blurRadius, blurRadius)
+            }
+            if (a.hasValue(R.styleable.VulkanBlurView_layerAlpha)) {
+                layerAlpha = a.getFloat(R.styleable.VulkanBlurView_layerAlpha, layerAlpha)
+            }
+            if (a.hasValue(R.styleable.VulkanBlurView_blurAlpha)) {
+                blurAlpha = a.getFloat(R.styleable.VulkanBlurView_blurAlpha, blurAlpha)
+            }
+            if (a.hasValue(R.styleable.VulkanBlurView_blurScale)) {
+                blurScale = a.getFloat(R.styleable.VulkanBlurView_blurScale, blurScale)
+            }
+            autoCapture = a.getBoolean(R.styleable.VulkanBlurView_autoCapture, true)
+            glassRimEnabled = a.getBoolean(R.styleable.VulkanBlurView_glassRimEnabled, false)
+        } finally {
+            a.recycle()
+        }
+    }
+
+    private fun uploadInput(bitmap: Bitmap) {
         try {
             blur.setInputBitmap(bitmap)
             maybeRequestRender()
@@ -221,13 +282,11 @@ class VulkanBlurView @JvmOverloads constructor(
         }
     }
 
-    fun requestRender() = maybeRequestRender()
-
     private fun captureBehind() {
         val bmp = sceneCapture.snapshot(this) ?: return
-        setInputBitmap(bmp)
+        uploadInput(bmp)
         sceneCapture.snapshotSurfaceLayers(this) { layered ->
-            if (layered != null) setInputBitmap(layered)
+            if (layered != null) uploadInput(layered)
         }
     }
 
@@ -290,17 +349,13 @@ class VulkanBlurView @JvmOverloads constructor(
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
-        continuousRendering = false
-        onFrameUpdate = null
         Choreographer.getInstance().removeFrameCallback(frameCallback)
         frameScheduled = false
         blur.releaseSurface()
     }
 
     override fun onDetachedFromWindow() {
-        autoCapture = false
-        continuousRendering = false
-        onFrameUpdate = null
+        if (autoCapture) viewTreeObserver.removeOnPreDrawListener(preDrawListener)
         Choreographer.getInstance().removeFrameCallback(frameCallback)
         frameScheduled = false
         sceneCapture.release()
