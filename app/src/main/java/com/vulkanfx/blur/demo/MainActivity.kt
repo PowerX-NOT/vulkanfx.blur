@@ -2,6 +2,8 @@ package com.vulkanfx.blur.demo
 
 import android.app.Activity
 import android.content.res.ColorStateList
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Build
@@ -220,10 +222,15 @@ class MainActivity : Activity() {
     }
 
     private fun showCardClipsDemo() {
-        showDemoScreen(blurRegions = cardClipRegions(), enableGlassRimToggle = true)
+        showDemoScreen(
+            blurRegions = cardClipRegions(),
+            enableGlassRimToggle = true,
+            animateCardClips = true,
+        )
     }
 
-    private fun cardClipRegions(): List<BlurRegion> = DemoScene.cardBlurRegions(radius)
+    private fun cardClipRegions(phaseSec: Float = 0f): List<BlurRegion> =
+        DemoScene.cardBlurRegions(radius, phaseSec)
 
     private fun showDemoScreen(
         alphaControls: Boolean = false,
@@ -232,6 +239,7 @@ class MainActivity : Activity() {
         initialBlurScale: Float = 1f,
         blurRegions: List<BlurRegion> = emptyList(),
         enableGlassRimToggle: Boolean = false,
+        animateCardClips: Boolean = false,
     ) {
         val deviceInfo = TextView(this).apply {
             setTextColor(Color.WHITE)
@@ -253,6 +261,33 @@ class MainActivity : Activity() {
             }
             setInputBitmap(DemoScene.wallpaper())
             onStatus = { deviceInfo.text = it }
+        }
+
+        if (animateCardClips) {
+            val tallWallpaper = DemoScene.tallWallpaper()
+            val frameBitmap = Bitmap.createBitmap(
+                DemoScene.WALLPAPER_WIDTH,
+                DemoScene.WALLPAPER_HEIGHT,
+                Bitmap.Config.ARGB_8888,
+            )
+            val frameCanvas = Canvas(frameBitmap)
+            var scrollY = 0f
+            val animStartNanos = System.nanoTime()
+            blurView.onFrameUpdate = {
+                when {
+                    blurView.parent == null -> false
+                    else -> {
+                        scrollY = (scrollY + 2f) % DemoScene.WALLPAPER_HEIGHT
+                        frameCanvas.drawColor(Color.BLACK)
+                        frameCanvas.drawBitmap(tallWallpaper, 0f, -scrollY, null)
+                        blurView.setInputBitmap(frameBitmap)
+                        val phaseSec = (System.nanoTime() - animStartNanos) / 1_000_000_000f
+                        blurView.blurRegions = cardClipRegions(phaseSec)
+                        true
+                    }
+                }
+            }
+            blurView.continuousRendering = true
         }
 
         val radiusSlider = SeekBar(this).apply {

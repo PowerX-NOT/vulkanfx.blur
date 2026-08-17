@@ -82,12 +82,25 @@ class VulkanBlurView @JvmOverloads constructor(
             field = value
             try {
                 blur.setBlurRegions(value)
-                requestRender()
+                maybeRequestRender()
             } catch (e: IllegalStateException) {
                 Log.e(TAG, "Vulkan setBlurRegions failed", e)
                 onStatus?.invoke("VulkanBlur setBlurRegions failed:\n${e.message}")
             }
         }
+
+    /**
+     * When true, re-render every vsync. Use with [onFrameUpdate] for animated content
+     * (scroll + moving blur regions) so updates always run before [VulkanBlur.render].
+     */
+    var continuousRendering: Boolean = false
+        set(value) {
+            field = value
+            if (value) scheduleFrame()
+        }
+
+    /** Called before each render while [continuousRendering] is on. Return false to skip the frame. */
+    var onFrameUpdate: (() -> Boolean)? = null
 
     /** Layer transform applied before blurRegions (AOSP blurRegionTransform). */
     var blurRegionTransform: FloatArray = VulkanBlur.BLUR_REGION_TRANSFORM_IDENTITY
@@ -131,17 +144,30 @@ class VulkanBlurView @JvmOverloads constructor(
 
     private val blur = VulkanBlur()
     private var frameScheduled = false
+    private var suppressRenderRequest = false
     private val frameCallback = Choreographer.FrameCallback {
         frameScheduled = false
-        if (!blur.isReady || !blur.hasInput) return@FrameCallback
+        if (!blur.isReady || !blur.hasInput) {
+            if (continuousRendering) scheduleFrame()
+            return@FrameCallback
+        }
         try {
+            suppressRenderRequest = true
+            val proceed = onFrameUpdate?.invoke() ?: true
+            suppressRenderRequest = false
+            if (!proceed) {
+                if (continuousRendering) scheduleFrame()
+                return@FrameCallback
+            }
             blur.render()
             onFrameStats?.invoke(blur.downsampleMs, blur.upsampleMs, blur.totalMs)
             onStatus?.invoke(blur.info())
         } catch (e: IllegalStateException) {
+            suppressRenderRequest = false
             Log.e(TAG, "Vulkan render failed", e)
             onStatus?.invoke("VulkanBlur render failed:\n${e.message}")
         }
+        if (continuousRendering) scheduleFrame()
     }
 
     init {
@@ -157,7 +183,7 @@ class VulkanBlurView @JvmOverloads constructor(
     fun setInputBitmap(bitmap: Bitmap) {
         try {
             blur.setInputBitmap(bitmap)
-            requestRender()
+            maybeRequestRender()
         } catch (e: IllegalStateException) {
             Log.e(TAG, "Vulkan setInputBitmap failed", e)
             onStatus?.invoke("VulkanBlur setInputBitmap failed:\n${e.message}")
@@ -167,8 +193,17 @@ class VulkanBlurView @JvmOverloads constructor(
         }
     }
 
-    fun requestRender() {
-        if (frameScheduled || !blur.isReady || !blur.hasInput) return
+    fun requestRender() = maybeRequestRender()
+
+    private fun maybeRequestRender() {
+        if (suppressRenderRequest) return
+        if (!continuousRendering && (!blur.isReady || !blur.hasInput)) return
+        scheduleFrame()
+    }
+
+    private fun scheduleFrame() {
+        if (frameScheduled) return
+        if (!blur.hasInput && !continuousRendering) return
         frameScheduled = true
         Choreographer.getInstance().postFrameCallback(frameCallback)
     }
@@ -214,12 +249,16 @@ class VulkanBlurView @JvmOverloads constructor(
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
+        continuousRendering = false
+        onFrameUpdate = null
         Choreographer.getInstance().removeFrameCallback(frameCallback)
         frameScheduled = false
         blur.releaseSurface()
     }
 
     override fun onDetachedFromWindow() {
+        continuousRendering = false
+        onFrameUpdate = null
         Choreographer.getInstance().removeFrameCallback(frameCallback)
         frameScheduled = false
         blur.detach()

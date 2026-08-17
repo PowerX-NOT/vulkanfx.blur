@@ -74,6 +74,9 @@ private:
     bool ensureGlassRimPipeline(std::string* error);
     bool ensureCompositeImage(uint32_t w, uint32_t h, std::string* error);
     void writeCompositeSet(VkImageView blurred, VkImageView original);
+    bool ensureOriginalSnapshot(uint32_t w, uint32_t h, std::string* error);
+    bool copyInputSnapshot(VkCommandBuffer cmd);
+    bool copySourceToComposite(VkCommandBuffer cmd, VkImage srcImage, bool srcReady);
     bool copyInputToComposite(VkCommandBuffer cmd);
     bool drawBlurRegion(VkCommandBuffer cmd, const VulkanImage& blurred, float radius,
                         float blurAlpha, float blurScale, const BlurRegion* region);
@@ -89,11 +92,15 @@ private:
 
     KawaseBlur generator_;
     VulkanImage composite_;
+    /** AOSP blurInput snapshot — stable sharp source while compositing blur regions. */
+    VulkanImage originalSnapshot_;
     const VulkanImage* inputRef_ = nullptr;
     VkImage inputImage_ = VK_NULL_HANDLE;
     VkImageView inputView_ = VK_NULL_HANDLE;
+    VkImageView originalView_ = VK_NULL_HANDLE;
     uint32_t srcW_ = 0;
     uint32_t srcH_ = 0;
+    bool originalSnapshotReady_ = false;
 
     int backgroundBlurRadius_ = 0;
     float backgroundBlurScale_ = 1.f;

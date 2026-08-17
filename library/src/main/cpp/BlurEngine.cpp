@@ -57,6 +57,7 @@ void BlurEngine::destroy() {
     if (device_ == VK_NULL_HANDLE) return;
     generator_.destroy();
     composite_.destroy();
+    originalSnapshot_.destroy();
     if (descPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(device_, descPool_, nullptr);
     if (rimDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(device_, rimDescPool_, nullptr);
     if (compositePipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, compositePipeline_, nullptr);
@@ -79,6 +80,8 @@ void BlurEngine::destroy() {
     glassRimSet_ = VK_NULL_HANDLE;
     inputView_ = VK_NULL_HANDLE;
     compositeReady_ = false;
+    originalSnapshotReady_ = false;
+    originalView_ = VK_NULL_HANDLE;
     srcW_ = srcH_ = 0;
 }
 
@@ -270,6 +273,21 @@ bool BlurEngine::ensureCompositeImage(uint32_t w, uint32_t h, std::string* error
     return true;
 }
 
+bool BlurEngine::ensureOriginalSnapshot(uint32_t w, uint32_t h, std::string* error) {
+    if (originalSnapshot_.image != VK_NULL_HANDLE && originalSnapshot_.width == w &&
+        originalSnapshot_.height == h) {
+        return true;
+    }
+    originalSnapshot_.destroy();
+    const VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (!originalSnapshot_.create(device_, physical_, w, h, VK_FORMAT_R8G8B8A8_UNORM, usage, error)) {
+        return false;
+    }
+    originalSnapshotReady_ = false;
+    return true;
+}
+
 bool BlurEngine::setInput(const VulkanImage& src, std::string* error) {
     inputRef_ = &src;
     inputImage_ = src.image;
@@ -277,6 +295,8 @@ bool BlurEngine::setInput(const VulkanImage& src, std::string* error) {
     srcW_ = src.width;
     srcH_ = src.height;
     if (!ensureCompositeImage(src.width, src.height, error)) return false;
+    if (!ensureOriginalSnapshot(src.width, src.height, error)) return false;
+    generator_.invalidateInput();
     if (generator_.passes() == 0) {
         return generator_.create(device_, physical_, src, legacyRadius_, queueFamily_, cmdBarrier2_, error);
     }
@@ -351,6 +371,10 @@ bool BlurEngine::runBlur(VkCommandBuffer cmd, float radius, std::string* error) 
         if (error) *error = "BlurEngine: no input";
         return false;
     }
+    const VkImageView blurSrc = originalView_ != VK_NULL_HANDLE ? originalView_ : inputView_;
+    if (blurSrc != VK_NULL_HANDLE) {
+        generator_.bindInputSource(blurSrc);
+    }
     if (!generator_.setRadius(radius, *inputRef_, error)) return false;
     return generator_.record(cmd, error);
 }
@@ -387,10 +411,13 @@ void BlurEngine::writeCompositeSet(VkImageView blurred, VkImageView original) {
     vkUpdateDescriptorSets(device_, 3, writes, 0, nullptr);
 }
 
-bool BlurEngine::copyInputToComposite(VkCommandBuffer cmd) {
-    imageBarrier(cmd, cmdBarrier2_, composite_.image,
+bool BlurEngine::copyInputSnapshot(VkCommandBuffer cmd) {
+    if (inputImage_ == VK_NULL_HANDLE || originalSnapshot_.image == VK_NULL_HANDLE) return false;
+
+    imageBarrier(cmd, cmdBarrier2_, originalSnapshot_.image,
                  VK_PIPELINE_STAGE_2_NONE, 0,
-                 compositeReady_ ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                 originalSnapshotReady_ ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+                                        : VK_IMAGE_LAYOUT_UNDEFINED,
                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     imageBarrier(cmd, cmdBarrier2_, inputImage_,
@@ -405,7 +432,45 @@ bool BlurEngine::copyInputToComposite(VkCommandBuffer cmd) {
     region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     region.dstSubresource.layerCount = 1;
     region.extent = {srcW_, srcH_, 1};
-    vkCmdCopyImage(cmd, inputImage_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, composite_.image,
+    vkCmdCopyImage(cmd, inputImage_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, originalSnapshot_.image,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    imageBarrier(cmd, cmdBarrier2_, originalSnapshot_.image,
+                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT |
+                                                                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    imageBarrier(cmd, cmdBarrier2_, inputImage_,
+                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    originalSnapshotReady_ = true;
+    originalView_ = originalSnapshot_.view;
+    return true;
+}
+
+bool BlurEngine::copySourceToComposite(VkCommandBuffer cmd, VkImage srcImage, bool srcReady) {
+    imageBarrier(cmd, cmdBarrier2_, composite_.image,
+                 VK_PIPELINE_STAGE_2_NONE, 0,
+                 compositeReady_ ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    imageBarrier(cmd, cmdBarrier2_, srcImage,
+                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                 srcReady ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                          : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+    VkImageCopy region{};
+    region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.srcSubresource.layerCount = 1;
+    region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.dstSubresource.layerCount = 1;
+    region.extent = {srcW_, srcH_, 1};
+    vkCmdCopyImage(cmd, srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, composite_.image,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
     imageBarrier(cmd, cmdBarrier2_, composite_.image,
@@ -415,7 +480,7 @@ bool BlurEngine::copyInputToComposite(VkCommandBuffer cmd) {
                                                                 VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
                                                                 VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                  VK_IMAGE_LAYOUT_GENERAL);
-    imageBarrier(cmd, cmdBarrier2_, inputImage_,
+    imageBarrier(cmd, cmdBarrier2_, srcImage,
                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
@@ -424,9 +489,15 @@ bool BlurEngine::copyInputToComposite(VkCommandBuffer cmd) {
     return true;
 }
 
+bool BlurEngine::copyInputToComposite(VkCommandBuffer cmd) {
+    return copySourceToComposite(cmd, inputImage_, true);
+}
+
 bool BlurEngine::drawBlurRegion(VkCommandBuffer cmd, const VulkanImage& blurred, float radius,
                                 float blurAlpha, float blurScale, const BlurRegion* region) {
-    writeCompositeSet(blurred.view, inputView_);
+    const VkImageView original =
+            originalView_ != VK_NULL_HANDLE ? originalView_ : inputView_;
+    writeCompositeSet(blurred.view, original);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compositePipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_, 0, 1, &compositeSet_,
                             0, nullptr);
@@ -525,7 +596,16 @@ bool BlurEngine::record(VkCommandBuffer cmd, std::string* error) {
         return generator_.record(cmd, error);
     }
 
-    if (!copyInputToComposite(cmd)) return false;
+    const bool regionMode = !blurRegions_.empty();
+    originalView_ = VK_NULL_HANDLE;
+
+    // AOSP: snapshot blurInput once, copy sharp to output, generate()+drawBlurRegion per clip.
+    if (regionMode) {
+        if (!copyInputSnapshot(cmd)) return false;
+        if (!copySourceToComposite(cmd, originalSnapshot_.image, originalSnapshotReady_)) return false;
+    } else if (!copyInputToComposite(cmd)) {
+        return false;
+    }
 
     int cachedBlurRadius = -1;
     const int bgRadius = effectiveBackgroundRadius();

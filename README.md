@@ -65,6 +65,21 @@ blurView.setInputBitmap(updatedBitmap)
 blurView.requestRender()  // optional; property changes already schedule a frame
 ```
 
+### Animated blur regions (scrolling wallpaper, moving cards)
+
+For live content that changes every frame, use `continuousRendering` with `onFrameUpdate` so bitmap upload and region updates run **before** `render()` on the same vsync (avoids blur/position desync):
+
+```kotlin
+blurView.continuousRendering = true
+blurView.onFrameUpdate = {
+    blurView.setInputBitmap(scrolledFrameBitmap)
+    blurView.blurRegions = updatedRegions
+    true  // return false to skip this frame
+}
+```
+
+Set `continuousRendering = false` (or detach the view) when animation stops. Property setters called from inside `onFrameUpdate` do not schedule a second frame.
+
 Optional callbacks:
 
 ```kotlin
@@ -119,6 +134,8 @@ blur.detach()          // destroy Vulkan context
 | `info()` | Multi-line status string (device, timings, pyramid). |
 | `downsampleMs` / `upsampleMs` / `totalMs` | Last frame GPU timings (-1 if unsupported). |
 
+`VulkanBlurView` also exposes `continuousRendering` and `onFrameUpdate` for per-frame animated content (see Quick start above).
+
 ### Glass rim (Vulkan compute)
 
 Gradient stroke rim is rendered in the same Vulkan frame as blur (`glass_rim.comp`):
@@ -137,6 +154,7 @@ Matches `BlurFilter::drawBlurRegion` + `SkiaRenderEngine` blur path:
 - Kawase generation uses the same `× 0.57735` sigma scale as AOSP `KawaseBlurDualFilterV2`.
 - **Background blur**: `effectiveRadius = backgroundBlurRadius * layerAlpha` (or legacy `setBlurRadius` when no regions).
 - **Blur regions**: per-region radius (not scaled by layer alpha); draw alpha = `region.alpha * layerAlpha`; scale = 1.
+- **Blur regions pipeline** (AOSP `SkiaRenderEngine`): snapshot `blurInput` → copy sharp to composite → `generate()` per cached radius → `drawBlurRegion()` per clip. Kawase downsample rebinds to the snapshot each frame (`bindInputSource`).
 - **Radius &lt; 10**: crossfade between sharp input and blurred output (`mixFactor = radius / 10`).
 - **Radius ≥ 10**: quarter-res Kawase pyramid; composite samples with linear filtering + optional zoom.
 - **Rounded clips**: SDF rounded-rect mask per `BlurRegion` corner radii.
@@ -161,7 +179,7 @@ The demo draws a synthetic wallpaper (`DemoScene` in `:app` only) and exposes th
 
 - **Test Blur** — full-frame background blur + radius slider
 - **Blur + Alpha** — layer alpha, blur alpha, and blur scale sliders
-- **Card Clips** — three rounded `BlurRegion` clips over the wallpaper
+- **Card Clips** — three rounded `BlurRegion` clips over a vertically scrolling wallpaper; cards drift on independent motion paths with frosted blur inside each clip (uses `continuousRendering` + `onFrameUpdate`)
 
 ## AOSP parity scope
 
@@ -174,6 +192,7 @@ The demo draws a synthetic wallpaper (`DemoScene` in `:app` only) and exposes th
 | `layerAlpha` → radius scale | `setLayerAlpha` |
 | `BlurRegion` rounded clips | `setBlurRegions` / `BlurRegion` |
 | `blurRegionTransform` | `setBlurRegionTransform` (3×3 affine) |
+| `blurInput` snapshot before region composite | `BlurEngine::copyInputSnapshot` + `KawaseBlur::bindInputSource` |
 | Kawase V2 pyramid | `KawaseBlur` |
 | Blur radius caching (per frame) | Reuses pyramid output when multiple regions share a radius |
 

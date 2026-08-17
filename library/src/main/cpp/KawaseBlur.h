@@ -22,6 +22,10 @@ public:
     void setExternalComposite(bool external) { externalComposite_ = external; }
     bool needsComposite() const;
     bool resize(const VulkanImage& src, std::string* error);
+    /** Rebind downsample input (AOSP blurInput snapshot) without rebuilding the pyramid. */
+    void bindInputSource(VkImageView view);
+    /** Force the next [record] to treat pyramid images as needing layout refresh. */
+    void invalidateInput();
     void destroy();
     bool record(VkCommandBuffer cmd, std::string* error);
     void collectTimestamps();

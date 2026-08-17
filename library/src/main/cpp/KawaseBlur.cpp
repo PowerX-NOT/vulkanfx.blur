@@ -520,11 +520,24 @@ bool KawaseBlur::resize(const VulkanImage& src, std::string* error) {
         if (error) *error = "KawaseBlur::resize before create";
         return false;
     }
-    if (src.width == srcW_ && src.height == srcH_) return true;
+    if (src.width == srcW_ && src.height == srcH_) {
+        bindInputSource(src.view);
+        return true;
+    }
     const KawaseMapped mapped = mapRadius(radius_);
     step_ = mapped.step;
     filterDepth_ = mapped.depth;
     return rebuildPyramid(src, mapped.extraPasses, error);
+}
+
+void KawaseBlur::bindInputSource(VkImageView view) {
+    if (view == VK_NULL_HANDLE || downSets_.empty()) return;
+    inputView_ = view;
+    writeSet(downSets_[0], view, downImages_[0].view, view, sampler_);
+}
+
+void KawaseBlur::invalidateInput() {
+    pyramidReady_ = false;
 }
 
 bool KawaseBlur::record(VkCommandBuffer cmd, std::string* error) {
