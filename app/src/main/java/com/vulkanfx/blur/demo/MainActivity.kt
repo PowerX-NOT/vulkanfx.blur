@@ -26,8 +26,7 @@ class MainActivity : Activity() {
             typeface = Typeface.MONOSPACE
             text = "VulkanBlur: waiting for surface…"
         }
-        val blurView = VulkanBlurView(this).apply {
-            blurRadius = radius.toFloat()
+        val blurView = VulkanBlurView(this, blurRadius = radius.toFloat()).apply {
             onStatus = { status.text = it }
         }
         val slider = SeekBar(this).apply {

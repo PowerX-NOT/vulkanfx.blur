@@ -82,6 +82,18 @@ Java_com_vulkanfx_blur_VulkanBlur_nativeSetRadius(JNIEnv* env, jobject, jlong ha
     }
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_vulkanfx_blur_VulkanBlur_nativeRender(JNIEnv* env, jobject, jlong handle) {
+    VulkanContext* ctx = fromHandle(handle);
+    if (!ctx) {
+        throwState(env, "native handle is null");
+        return;
+    }
+    if (!ctx->render()) {
+        throwState(env, ctx->lastError().empty() ? "render failed" : ctx->lastError().c_str());
+    }
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_vulkanfx_blur_VulkanBlur_nativeInfo(JNIEnv* env, jobject, jlong handle) {
     VulkanContext* ctx = fromHandle(handle);
@@ -90,6 +102,27 @@ Java_com_vulkanfx_blur_VulkanBlur_nativeInfo(JNIEnv* env, jobject, jlong handle)
         return nullptr;
     }
     return env->NewStringUTF(ctx->info().c_str());
+}
+
+extern "C" JNIEXPORT jfloat JNICALL
+Java_com_vulkanfx_blur_VulkanBlur_nativeDownMs(JNIEnv* env, jobject, jlong handle) {
+    (void)env;
+    VulkanContext* ctx = fromHandle(handle);
+    return ctx ? ctx->downMs() : -1.0f;
+}
+
+extern "C" JNIEXPORT jfloat JNICALL
+Java_com_vulkanfx_blur_VulkanBlur_nativeUpMs(JNIEnv* env, jobject, jlong handle) {
+    (void)env;
+    VulkanContext* ctx = fromHandle(handle);
+    return ctx ? ctx->upMs() : -1.0f;
+}
+
+extern "C" JNIEXPORT jfloat JNICALL
+Java_com_vulkanfx_blur_VulkanBlur_nativeTotalMs(JNIEnv* env, jobject, jlong handle) {
+    (void)env;
+    VulkanContext* ctx = fromHandle(handle);
+    return ctx ? ctx->totalMs() : -1.0f;
 }
 
 extern "C" JNIEXPORT void JNICALL

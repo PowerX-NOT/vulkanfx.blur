@@ -8,6 +8,11 @@ import android.util.Log
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 
+/**
+ * SurfaceView host for [VulkanBlur].
+ *
+ *     VulkanBlurView(context).apply { blurRadius = 24f }
+ */
 class VulkanBlurView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
@@ -17,8 +22,14 @@ class VulkanBlurView @JvmOverloads constructor(
 
     var blurRadius: Float = 24f
         set(value) {
-            field = value
-            if (blur.isReady) applyRadius()
+            field = value.coerceAtLeast(1f)
+            try {
+                blur.setBlurRadius(field)
+                if (blur.isReady) onStatus?.invoke(blur.info())
+            } catch (e: IllegalStateException) {
+                Log.e(TAG, "Vulkan setRadius failed", e)
+                onStatus?.invoke("VulkanBlur setRadius failed:\n${e.message}")
+            }
         }
 
     private val blur = VulkanBlur()
@@ -26,6 +37,11 @@ class VulkanBlurView @JvmOverloads constructor(
     init {
         holder.setFormat(PixelFormat.RGBA_8888)
         holder.addCallback(this)
+    }
+
+    /** Convenience constructor matching the conceptual `VulkanBlurView(blurRadius = …)` API. */
+    constructor(context: Context, blurRadius: Float) : this(context) {
+        this.blurRadius = blurRadius
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
@@ -36,8 +52,9 @@ class VulkanBlurView @JvmOverloads constructor(
         }
         try {
             val debug = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
-            blur.attach(surface, enableValidation = debug)
-            applyRadius()
+            blur.setBlurRadius(blurRadius)
+            val info = blur.attach(surface, enableValidation = debug)
+            onStatus?.invoke(info)
         } catch (e: IllegalStateException) {
             Log.e(TAG, "Vulkan init failed", e)
             onStatus?.invoke("VulkanBlur init failed:\n${e.message}")
@@ -57,23 +74,12 @@ class VulkanBlurView @JvmOverloads constructor(
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
-        // Keep device/pipelines; only drop the window + swapchain.
         blur.releaseSurface()
     }
 
     override fun onDetachedFromWindow() {
         blur.detach()
         super.onDetachedFromWindow()
-    }
-
-    private fun applyRadius() {
-        try {
-            blur.setBlurRadius(blurRadius)
-            onStatus?.invoke(blur.info())
-        } catch (e: IllegalStateException) {
-            Log.e(TAG, "Vulkan setRadius failed", e)
-            onStatus?.invoke("VulkanBlur setRadius failed:\n${e.message}")
-        }
     }
 
     private companion object {

@@ -820,12 +820,22 @@ bool VulkanContext::setRadius(float radius) {
     return presentTest();
 }
 
+bool VulkanContext::render() {
+    if (testImage_.image == VK_NULL_HANDLE || blur_.passes() == 0) {
+        error_ = "render before working resources";
+        return false;
+    }
+    vkDeviceWaitIdle(device_);
+    if (!blur_.execute(cmd_, queue_, &error_)) return false;
+    return presentTest();
+}
+
 std::string VulkanContext::info() const {
     const int w = window_ ? ANativeWindow_getWidth(window_) : 0;
     const int h = window_ ? ANativeWindow_getHeight(window_) : 0;
     std::string s;
-    s += "VulkanBlur Phase 10\n";
-    s += "status=timestamps\n";
+    s += "VulkanBlur Phase 11\n";
+    s += "status=api\n";
     s += "device=";
     s += props_.deviceName;
     s += "\n";
