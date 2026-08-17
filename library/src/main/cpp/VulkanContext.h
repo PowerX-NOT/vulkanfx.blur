@@ -7,7 +7,6 @@
 #include <vector>
 
 #include "KawaseBlur.h"
-#include "GlassPass.h"
 
 class VulkanContext {
 public:
@@ -43,7 +42,6 @@ private:
     bool createTestTexture(uint32_t w, uint32_t h);
     bool uploadTestTexture();
     bool ensureWorkingResources();
-    bool runBlurAndGlass();
     bool presentTest();
     void barrierImage(VkCommandBuffer cmd, VkImage image,
                       VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess, VkImageLayout oldLayout,
@@ -69,7 +67,6 @@ private:
     std::vector<VkImage> swapchainImages_;
     VulkanImage testImage_;
     KawaseBlur blur_;
-    GlassPass glass_;
     float radius_ = 24.0f;
     PFN_vkCmdPipelineBarrier2 cmdBarrier2_ = nullptr;
     VkPhysicalDeviceProperties props_{};

@@ -8,7 +8,6 @@ add_library(vulkanblur SHARED
     VulkanImage.cpp
     VulkanBuffer.cpp
     KawaseBlur.cpp
-    GlassPass.cpp
     jni.cpp
 )
 
@@ -52,10 +51,6 @@ endmacro()
 
 embed_comp(kawase_down)
 embed_comp(kawase_up)
-embed_comp(glass)
-set_source_files_properties(KawaseBlur.cpp PROPERTIES OBJECT_DEPENDS
-    "${CMAKE_CURRENT_BINARY_DIR}/kawase_down_comp_spv.inc;${CMAKE_CURRENT_BINARY_DIR}/kawase_up_comp_spv.inc")
-set_source_files_properties(GlassPass.cpp PROPERTIES OBJECT_DEPENDS
-    "${CMAKE_CURRENT_BINARY_DIR}/glass_comp_spv.inc")
+set_source_files_properties(KawaseBlur.cpp PROPERTIES OBJECT_DEPENDS "${_shader_incs}")
 add_custom_target(shaders DEPENDS ${_shader_incs})
 add_dependencies(vulkanblur shaders)
