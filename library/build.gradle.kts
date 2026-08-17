@@ -1,9 +1,10 @@
 plugins {
-    alias(libs.plugins.android.application)
+    alias(libs.plugins.android.library)
 }
 
 android {
-    namespace = "com.vulkanfx.blur.demo"
+    namespace = "com.vulkanfx.blur"
+    ndkVersion = "28.2.13676358"
     compileSdk {
         version = release(36) {
             minorApiLevel = 1
@@ -11,20 +12,14 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.vulkanfx.blur.demo"
         minSdk = 30
-        targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
         ndk {
             abiFilters += "arm64-v8a"
         }
-    }
-
-    buildTypes {
-        release {
-            optimization {
-                enable = false
+        externalNativeBuild {
+            cmake {
+                arguments += "-DANDROID_STL=c++_static"
+                arguments += "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
             }
         }
     }
@@ -39,8 +34,10 @@ android {
             jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
         }
     }
-}
 
-dependencies {
-    implementation(project(":library"))
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+        }
+    }
 }
