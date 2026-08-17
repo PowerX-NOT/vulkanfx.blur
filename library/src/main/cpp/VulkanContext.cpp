@@ -187,6 +187,7 @@ VulkanContext::~VulkanContext() {
         vkDeviceWaitIdle(device_);
     }
     blur_.destroy();
+    glass_.destroy();
     testImage_.destroy();
     destroySwapchain();
     if (acquireSem_ != VK_NULL_HANDLE) vkDestroySemaphore(device_, acquireSem_, nullptr);
@@ -483,14 +484,28 @@ bool VulkanContext::ensureWorkingResources() {
         } else if (!blur_.resize(testImage_, &error_)) {
             return false;
         }
-        if (!blur_.execute(cmd_, queue_, &error_)) return false;
-    } else if (blur_.passes() == 0) {
+        return runBlurAndGlass();
+    }
+    if (blur_.passes() == 0) {
         if (!blur_.create(device_, physical_, testImage_, radius_, queueFamily_, cmdBarrier2_, &error_)) {
             return false;
         }
-        if (!blur_.execute(cmd_, queue_, &error_)) return false;
+        return runBlurAndGlass();
     }
     return true;
+}
+
+bool VulkanContext::runBlurAndGlass() {
+    if (!blur_.execute(cmd_, queue_, &error_)) return false;
+    const VulkanImage& blurred = blur_.output();
+    if (glass_.output().image == VK_NULL_HANDLE) {
+        if (!glass_.create(device_, physical_, blurred.width, blurred.height, cmdBarrier2_, &error_)) {
+            return false;
+        }
+    } else if (!glass_.resize(blurred.width, blurred.height, &error_)) {
+        return false;
+    }
+    return glass_.execute(cmd_, queue_, blurred, &error_);
 }
 
 bool VulkanContext::uploadTestTexture() {
@@ -711,7 +726,7 @@ bool VulkanContext::presentTest() {
         VkImageBlit blit{};
         blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         blit.srcSubresource.layerCount = 1;
-        const VulkanImage& src = blur_.output();
+        const VulkanImage& src = glass_.output();
         blit.srcOffsets[1] = {static_cast<int32_t>(src.width), static_cast<int32_t>(src.height), 1};
         blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         blit.dstSubresource.layerCount = 1;
@@ -816,7 +831,7 @@ bool VulkanContext::setRadius(float radius) {
     }
     vkDeviceWaitIdle(device_);
     if (!blur_.setRadius(radius, testImage_, &error_)) return false;
-    if (!blur_.execute(cmd_, queue_, &error_)) return false;
+    if (!runBlurAndGlass()) return false;
     return presentTest();
 }
 
@@ -826,7 +841,7 @@ bool VulkanContext::render() {
         return false;
     }
     vkDeviceWaitIdle(device_);
-    if (!blur_.execute(cmd_, queue_, &error_)) return false;
+    if (!runBlurAndGlass()) return false;
     return presentTest();
 }
 
@@ -834,8 +849,8 @@ std::string VulkanContext::info() const {
     const int w = window_ ? ANativeWindow_getWidth(window_) : 0;
     const int h = window_ ? ANativeWindow_getHeight(window_) : 0;
     std::string s;
-    s += "VulkanBlur Phase 11\n";
-    s += "status=api\n";
+    s += "VulkanBlur Phase 12\n";
+    s += "status=glass\n";
     s += "device=";
     s += props_.deviceName;
     s += "\n";

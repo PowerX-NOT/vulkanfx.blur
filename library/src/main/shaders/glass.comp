@@ -1,0 +1,35 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform sampler2D blurred;
+layout(binding = 1, rgba8) writeonly uniform image2D dst;
+
+// Phase 12 Liquid Glass foundation: tinted blur + screen-space rim.
+// Refraction / Fresnel / chromatic dispersion come later.
+layout(push_constant) uniform Params {
+    vec2 resolution;
+    float tintStrength;  // 0..1 cool glass tint
+    float rimStrength;   // 0..1 edge highlight
+} p;
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= int(p.resolution.x) || pixel.y >= int(p.resolution.y)) {
+        return;
+    }
+
+    const vec2 uv = (vec2(pixel) + 0.5) / p.resolution;
+    vec4 c = textureLod(blurred, uv, 0.0);
+
+    // Cool translucent tint (stand-in until real lighting).
+    const vec3 glassTint = vec3(0.72, 0.88, 1.0);
+    c.rgb = mix(c.rgb, c.rgb * glassTint, p.tintStrength);
+
+    // Screen-space rim ≈ edge highlight; replace with real Fresnel later.
+    const vec2 d = abs(uv - 0.5) * 2.0;
+    const float rim = pow(clamp(max(d.x, d.y), 0.0, 1.0), 4.0);
+    c.rgb += vec3(rim * p.rimStrength);
+
+    imageStore(dst, pixel, vec4(clamp(c.rgb, 0.0, 1.0), 1.0));
+}
