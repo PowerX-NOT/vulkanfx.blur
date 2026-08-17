@@ -1,0 +1,41 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform sampler2D src;
+layout(binding = 1, rgba8) writeonly uniform image2D dst;
+
+// texelSize = 1 / source resolution
+// offset    = Kawase radius in source texels (1.0 for the first downsample)
+// intensity = scale on the weighted sum (1.0 = energy-preserving)
+// resolution = destination size in pixels
+layout(push_constant) uniform Params {
+    vec2 texelSize;
+    float offset;
+    float intensity;
+    vec2 resolution;
+} p;
+
+void main() {
+    const ivec2 dstPixel = ivec2(gl_GlobalInvocationID.xy);
+    if (dstPixel.x >= int(p.resolution.x) || dstPixel.y >= int(p.resolution.y)) {
+        return;
+    }
+
+    // Dest pixel center in normalized UV. With dest = src/2 this lands on the
+    // center of the 2x2 source block this pixel represents.
+    const vec2 uv = (vec2(dstPixel) + 0.5) / p.resolution;
+
+    // Dual Kawase downsample (5 taps):
+    //   center  * 4/8
+    //   four diagonals at ±(texelSize * offset) each * 1/8
+    // Linear filtering + the extra diagonal taps approximate a wider box
+    // without a 9-sample kernel. textureLod: compute has no derivatives.
+    const vec2 o = p.texelSize * p.offset;
+    vec4 c = textureLod(src, uv, 0.0) * 4.0;
+    c += textureLod(src, uv + vec2(-o.x, -o.y), 0.0);
+    c += textureLod(src, uv + vec2(o.x, -o.y), 0.0);
+    c += textureLod(src, uv + vec2(-o.x, o.y), 0.0);
+    c += textureLod(src, uv + vec2(o.x, o.y), 0.0);
+    imageStore(dst, dstPixel, c * (0.125 * p.intensity));
+}

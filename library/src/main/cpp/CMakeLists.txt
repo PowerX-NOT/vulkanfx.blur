@@ -34,15 +34,21 @@ if(NOT EXISTS "${_glslc}")
     message(FATAL_ERROR "glslc not found under ${ANDROID_NDK}/shader-tools")
 endif()
 
-set(_copy_comp "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/copy.comp")
-set(_copy_inc "${CMAKE_CURRENT_BINARY_DIR}/copy_comp_spv.inc")
-add_custom_command(
-    OUTPUT "${_copy_inc}"
-    COMMAND "${_glslc}" -fshader-stage=compute -mfmt=c "${_copy_comp}" -o "${_copy_inc}"
-    DEPENDS "${_copy_comp}"
-    COMMENT "SPIR-V copy.comp"
-    VERBATIM
-)
-set_source_files_properties(VulkanContext.cpp PROPERTIES OBJECT_DEPENDS "${_copy_inc}")
-add_custom_target(copy_shader DEPENDS "${_copy_inc}")
-add_dependencies(vulkanblur copy_shader)
+set(_shader_incs "")
+macro(embed_comp NAME)
+    set(_src "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/${NAME}.comp")
+    set(_inc "${CMAKE_CURRENT_BINARY_DIR}/${NAME}_comp_spv.inc")
+    add_custom_command(
+        OUTPUT "${_inc}"
+        COMMAND "${_glslc}" -fshader-stage=compute -mfmt=c "${_src}" -o "${_inc}"
+        DEPENDS "${_src}"
+        COMMENT "SPIR-V ${NAME}.comp"
+        VERBATIM
+    )
+    list(APPEND _shader_incs "${_inc}")
+endmacro()
+
+embed_comp(kawase_down)
+set_source_files_properties(VulkanContext.cpp PROPERTIES OBJECT_DEPENDS "${_shader_incs}")
+add_custom_target(shaders DEPENDS ${_shader_incs})
+add_dependencies(vulkanblur shaders)

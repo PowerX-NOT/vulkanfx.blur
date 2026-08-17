@@ -34,9 +34,9 @@ private:
     void destroySwapchain();
     bool createTestTexture();
     bool uploadTestTexture();
-    bool createCopyPipeline();
-    void destroyCopyPipeline();
-    bool dispatchCopy();
+    bool createDownPipeline();
+    void destroyDownPipeline();
+    bool dispatchDown();
     bool presentTest();
     void barrierImage(VkCommandBuffer cmd, VkImage image,
                       VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess, VkImageLayout oldLayout,
@@ -61,12 +61,13 @@ private:
     VkExtent2D swapchainExtent_{};
     std::vector<VkImage> swapchainImages_;
     VulkanImage testImage_;
-    VulkanImage copyImage_;
-    VkDescriptorSetLayout copySetLayout_ = VK_NULL_HANDLE;
-    VkPipelineLayout copyPipelineLayout_ = VK_NULL_HANDLE;
-    VkPipeline copyPipeline_ = VK_NULL_HANDLE;
-    VkDescriptorPool copyDescPool_ = VK_NULL_HANDLE;
-    VkDescriptorSet copyDescSet_ = VK_NULL_HANDLE;
+    VulkanImage downImage_;
+    VkSampler sampler_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout downSetLayout_ = VK_NULL_HANDLE;
+    VkPipelineLayout downPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline downPipeline_ = VK_NULL_HANDLE;
+    VkDescriptorPool downDescPool_ = VK_NULL_HANDLE;
+    VkDescriptorSet downDescSet_ = VK_NULL_HANDLE;
     PFN_vkCmdPipelineBarrier2 cmdBarrier2_ = nullptr;
     VkPhysicalDeviceProperties props_{};
     uint32_t instanceApi_ = VK_API_VERSION_1_1;
