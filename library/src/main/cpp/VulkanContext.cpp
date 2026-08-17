@@ -850,7 +850,7 @@ std::string VulkanContext::info() const {
     const int h = window_ ? ANativeWindow_getHeight(window_) : 0;
     std::string s;
     s += "VulkanBlur Phase 12\n";
-    s += "status=glass\n";
+    s += "status=glass-rim\n";
     s += "device=";
     s += props_.deviceName;
     s += "\n";

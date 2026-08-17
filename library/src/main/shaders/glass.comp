@@ -5,31 +5,105 @@ layout(local_size_x = 16, local_size_y = 16) in;
 layout(binding = 0) uniform sampler2D blurred;
 layout(binding = 1, rgba8) writeonly uniform image2D dst;
 
-// Phase 12 Liquid Glass foundation: tinted blur + screen-space rim.
-// Refraction / Fresnel / chromatic dispersion come later.
+// Port of Photos/COUI GlassRimDrawable GradientStroke AGSL (FULL RBox).
+// Canvas drop-shadow / softBevel / crispEdge paints omitted — rim is the glass cue.
+// ponytail: fixed MaterialEffectConfig defaults; expose as uniforms when tuning matters.
 layout(push_constant) uniform Params {
     vec2 resolution;
-    float tintStrength;  // 0..1 cool glass tint
-    float rimStrength;   // 0..1 edge highlight
+    float corner;  // px; use ~height/2 for capsule like GlassRimDrawable
+    float _pad;
 } p;
 
+// MaterialEffectConfig$StrokeConfig defaults
+const float NEAR_W = 3.0;
+const float FAR_W = 3.0;
+const float NEAR_A = 0.8;
+const float FAR_A = 0.4;
+const vec2 NEAR_FADE_SIDES = vec2(0.38, 0.12);
+const vec2 FAR_FADE_SIDES = vec2(0.35, 0.3);
+const vec2 NEAR_FADE_CENTER = vec2(0.3, 0.02);
+const vec2 FAR_FADE_CENTER = vec2(0.08, 0.12);
+
+float RBox(vec2 pos, vec2 halfSize, float r) {
+    vec2 q = abs(pos) - halfSize + r;
+    return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+}
+
+float getDis(vec2 pos, vec2 halfSize) {
+    vec2 rect = abs(pos - halfSize);
+    return rect.x + rect.y;
+}
+
+vec3 getLineFadeTowardCenter(vec2 fade, float lineWidth) {
+    float x = clamp(fade.x, 0.0, 1.0);
+    float y = clamp(fade.y, 0.0, 1.0 - x);
+    float z = clamp(1.0 - x - y, 0.01, 1.0);
+    vec3 lineFade = lineWidth * vec3(x, y, z);
+    lineFade.y += lineFade.x;
+    lineFade.z += lineFade.y;
+    return -lineFade;
+}
+
+// BlendMode.OVERLAY used by GlassRimDrawable rimPaint.
+vec3 overlayBlend(vec3 base, vec3 blend) {
+    return mix(2.0 * base * blend, 1.0 - 2.0 * (1.0 - base) * (1.0 - blend), step(0.5, base));
+}
+
+vec4 gradientStrokeColorWithRatio(vec2 fragCoord, float ratio) {
+    vec2 rectSize = p.resolution;
+    vec2 halfSize = rectSize * 0.5;
+    vec2 pos = fragCoord - halfSize;
+    vec2 dirPos = normalize(pos + vec2(1e-5));
+    vec2 dirAbs = abs(dirPos);
+    vec2 posN = min(vec2(dirAbs.xy * halfSize.yx / max(vec2(0.001), dirAbs.yx)), halfSize) * sign(dirPos);
+    vec2 halfSizeSymbol = vec2(-halfSize.y, halfSize.x);
+    float flag = mix(-1.0, 1.0, step(ratio, 0.5)) * dot(halfSizeSymbol, posN);
+    float distanceAll = rectSize.x + rectSize.y;
+    float disPoint = distanceAll * min(ratio, 1.0 - ratio) * 2.0;
+    float disPos = getDis(posN, halfSize);
+    float distanceNear = mix(disPoint + disPos, abs(disPoint - disPos), step(0.0, flag));
+    distanceNear = min(2.0 * distanceAll - distanceNear, distanceNear);
+
+    vec2 nearLineFade = vec2(NEAR_FADE_SIDES.x, NEAR_FADE_SIDES.x + NEAR_FADE_SIDES.y);
+    vec2 farLineFade = vec2(FAR_FADE_SIDES.x, FAR_FADE_SIDES.x + FAR_FADE_SIDES.y);
+    float lineNearAlpha = NEAR_A * smoothstep(nearLineFade.y * distanceAll, nearLineFade.x * distanceAll, distanceNear);
+    float lineFarAlpha = FAR_A * smoothstep(farLineFade.y * distanceAll, farLineFade.x * distanceAll, distanceAll - distanceNear);
+
+    vec3 farFadeCenter = getLineFadeTowardCenter(FAR_FADE_CENTER, FAR_W);
+    vec3 nearFadeCenter = getLineFadeTowardCenter(NEAR_FADE_CENTER, NEAR_W);
+    float corner = min(p.corner, min(halfSize.x, halfSize.y));
+    float rectSdf = RBox(pos, halfSize, corner);
+    float lineNearSdf = smoothstep(0.0, nearFadeCenter.x, rectSdf)
+            - smoothstep(nearFadeCenter.y, nearFadeCenter.z, rectSdf);
+    float lineFarSdf = smoothstep(0.0, farFadeCenter.x, rectSdf)
+            - smoothstep(farFadeCenter.y, farFadeCenter.z, rectSdf);
+    lineNearAlpha *= lineNearSdf;
+    lineFarAlpha *= lineFarSdf;
+    float lineAlpha = clamp(lineNearAlpha + lineFarAlpha, 0.0, 1.0);
+    return vec4(vec3(lineAlpha), lineAlpha);  // white rim * alpha
+}
+
 void main() {
-    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
     if (pixel.x >= int(p.resolution.x) || pixel.y >= int(p.resolution.y)) {
         return;
     }
 
-    const vec2 uv = (vec2(pixel) + 0.5) / p.resolution;
-    vec4 c = textureLod(blurred, uv, 0.0);
+    vec2 fragCoord = vec2(pixel) + 0.5;
+    vec2 uv = fragCoord / p.resolution;
+    vec3 base = textureLod(blurred, uv, 0.0).rgb;
 
-    // Cool translucent tint (stand-in until real lighting).
-    const vec3 glassTint = vec3(0.72, 0.88, 1.0);
-    c.rgb = mix(c.rgb, c.rgb * glassTint, p.tintStrength);
+    // Photos updateShader: ratio = (w*1.5 + h) / ((h + w) * 2)
+    float ratio = (p.resolution.x * 1.5 + p.resolution.y) / ((p.resolution.y + p.resolution.x) * 2.0);
+    vec4 rim = gradientStrokeColorWithRatio(fragCoord, ratio);
 
-    // Screen-space rim ≈ edge highlight; replace with real Fresnel later.
-    const vec2 d = abs(uv - 0.5) * 2.0;
-    const float rim = pow(clamp(max(d.x, d.y), 0.0, 1.0), 4.0);
-    c.rgb += vec3(rim * p.rimStrength);
+    // Inside the rounded rect keep blur; outside stay dark (mask by RBox).
+    vec2 halfSize = p.resolution * 0.5;
+    float corner = min(p.corner, min(halfSize.x, halfSize.y));
+    float sdf = RBox(fragCoord - halfSize, halfSize, corner);
+    float inside = 1.0 - smoothstep(-1.0, 1.0, sdf);
+    base *= inside;
 
-    imageStore(dst, pixel, vec4(clamp(c.rgb, 0.0, 1.0), 1.0));
+    vec3 outRgb = mix(base, overlayBlend(base, rim.rgb), rim.a);
+    imageStore(dst, pixel, vec4(clamp(outRgb, 0.0, 1.0), 1.0));
 }

@@ -15,13 +15,10 @@ namespace {
 
 struct GlassPush {
     float resX, resY;
-    float tintStrength;
-    float rimStrength;
+    float corner;
+    float _pad;
 };
 static_assert(sizeof(GlassPush) == 16, "glass push layout");
-
-constexpr float kTint = 0.35f;
-constexpr float kRim = 0.45f;
 
 #define GP_TRY(expr)                                                       \
     do {                                                                   \
@@ -221,8 +218,9 @@ bool GlassPass::execute(VkCommandBuffer cmd, VkQueue queue, const VulkanImage& b
     GlassPush push{};
     push.resX = static_cast<float>(output_.width);
     push.resY = static_cast<float>(output_.height);
-    push.tintStrength = kTint;
-    push.rimStrength = kRim;
+    // GlassRimDrawable: when corner unset, use height/2 (capsule).
+    push.corner = push.resY * 0.5f;
+    push._pad = 0.0f;
     vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
     vkCmdDispatch(cmd, (output_.width + 15u) / 16u, (output_.height + 15u) / 16u, 1);
 
