@@ -199,6 +199,18 @@ class VulkanBlur {
     private external fun nativeDestroy(handle: Long)
 
     companion object {
+        /** Longest input edge; matches native `kMaxWorkEdge`. */
+        const val MAX_INPUT_EDGE = 1280
+
+        /** Size of an auto-captured frame for [srcW]×[srcH] (keeps aspect, caps longest edge). */
+        fun captureSize(srcW: Int, srcH: Int): Pair<Int, Int> {
+            if (srcW <= 0 || srcH <= 0) return 0 to 0
+            val edge = maxOf(srcW, srcH)
+            if (edge <= MAX_INPUT_EDGE) return srcW to srcH
+            val scale = MAX_INPUT_EDGE.toFloat() / edge
+            return (srcW * scale).toInt().coerceAtLeast(1) to (srcH * scale).toInt().coerceAtLeast(1)
+        }
+
         /** Column-major 3×3 identity (no region transform). */
         val BLUR_REGION_TRANSFORM_IDENTITY = floatArrayOf(
             1f, 0f, 0f,
@@ -207,6 +219,8 @@ class VulkanBlur {
         )
 
         init {
+            check(captureSize(2560, 1440) == 1280 to 720)
+            check(captureSize(720, 1280) == 720 to 1280)
             System.loadLibrary("vulkanblur")
         }
     }

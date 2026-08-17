@@ -10,11 +10,13 @@ import android.util.Log
 import android.view.Choreographer
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.view.ViewTreeObserver
 
 /**
  * SurfaceView host for [VulkanBlur].
  *
- * Provide content with [setInputBitmap] before the first frame is drawn.
+ * Provide content with [setInputBitmap], or set [autoCapture] to snapshot the
+ * window layers behind this view each frame (AOSP blurInput).
  */
 class VulkanBlurView @JvmOverloads constructor(
     context: Context,
@@ -90,6 +92,22 @@ class VulkanBlurView @JvmOverloads constructor(
         }
 
     /**
+     * Snapshot window layers behind this view each frame and feed them to the blur
+     * (AOSP RenderEngine `blurInput` / Magnifier PixelCopy). Does not capture other apps;
+     * that path is SurfaceFlinger `setBackgroundBlurRadius`.
+     */
+    var autoCapture: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            if (isAttachedToWindow) {
+                if (value) viewTreeObserver.addOnPreDrawListener(preDrawListener)
+                else viewTreeObserver.removeOnPreDrawListener(preDrawListener)
+            }
+            if (value) scheduleFrame()
+        }
+
+    /**
      * When true, re-render every vsync. Use with [onFrameUpdate] for animated content
      * (scroll + moving blur regions) so updates always run before [VulkanBlur.render].
      */
@@ -143,20 +161,30 @@ class VulkanBlurView @JvmOverloads constructor(
         }
 
     private val blur = VulkanBlur()
+    private val sceneCapture = SceneCapture()
     private var frameScheduled = false
     private var suppressRenderRequest = false
+    private val preDrawListener = ViewTreeObserver.OnPreDrawListener {
+        if (autoCapture) scheduleFrame()
+        true
+    }
     private val frameCallback = Choreographer.FrameCallback {
         frameScheduled = false
-        if (!blur.isReady || !blur.hasInput) {
-            if (continuousRendering) scheduleFrame()
+        if (!blur.isReady) {
+            if (continuousRendering || autoCapture) scheduleFrame()
             return@FrameCallback
         }
         try {
             suppressRenderRequest = true
             val proceed = onFrameUpdate?.invoke() ?: true
+            if (proceed && autoCapture) captureBehind()
             suppressRenderRequest = false
             if (!proceed) {
-                if (continuousRendering) scheduleFrame()
+                if (continuousRendering || autoCapture) scheduleFrame()
+                return@FrameCallback
+            }
+            if (!blur.hasInput) {
+                if (continuousRendering || autoCapture) scheduleFrame()
                 return@FrameCallback
             }
             blur.render()
@@ -195,17 +223,30 @@ class VulkanBlurView @JvmOverloads constructor(
 
     fun requestRender() = maybeRequestRender()
 
+    private fun captureBehind() {
+        val bmp = sceneCapture.snapshot(this) ?: return
+        setInputBitmap(bmp)
+        sceneCapture.snapshotSurfaceLayers(this) { layered ->
+            if (layered != null) setInputBitmap(layered)
+        }
+    }
+
     private fun maybeRequestRender() {
         if (suppressRenderRequest) return
-        if (!continuousRendering && (!blur.isReady || !blur.hasInput)) return
+        if (!continuousRendering && !autoCapture && (!blur.isReady || !blur.hasInput)) return
         scheduleFrame()
     }
 
     private fun scheduleFrame() {
         if (frameScheduled) return
-        if (!blur.hasInput && !continuousRendering) return
+        if (!blur.hasInput && !continuousRendering && !autoCapture) return
         frameScheduled = true
         Choreographer.getInstance().postFrameCallback(frameCallback)
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        if (autoCapture) viewTreeObserver.addOnPreDrawListener(preDrawListener)
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
@@ -257,10 +298,12 @@ class VulkanBlurView @JvmOverloads constructor(
     }
 
     override fun onDetachedFromWindow() {
+        autoCapture = false
         continuousRendering = false
         onFrameUpdate = null
         Choreographer.getInstance().removeFrameCallback(frameCallback)
         frameScheduled = false
+        sceneCapture.release()
         blur.detach()
         super.onDetachedFromWindow()
     }

@@ -31,14 +31,14 @@ dependencies {
 
 ## Quick start: `VulkanBlurView`
 
-Drop a `SurfaceView` subclass into your layout (or build it in code), feed it a bitmap, and drive frames with Choreographer:
+Drop a `SurfaceView` subclass into your layout (or build it in code), feed it a bitmap **or** set `autoCapture = true`, and drive frames with Choreographer:
 
 ```kotlin
 import com.vulkanfx.blur.VulkanBlurView
 
 val blurView = VulkanBlurView(context).apply {
     blurRadius = 24f
-    setInputBitmap(myArgb8888Bitmap)  // required before first frame
+    autoCapture = true          // or setInputBitmap(myArgb8888Bitmap)
 }
 
 // Add blurView to your view hierarchy (e.g. FrameLayout).
@@ -64,6 +64,17 @@ blurView.blurRegions = listOf(
 blurView.setInputBitmap(updatedBitmap)
 blurView.requestRender()  // optional; property changes already schedule a frame
 ```
+
+### Automatic background capture
+
+Set `autoCapture = true` to snapshot the window layers **behind** the view each frame (AOSP RenderEngine `blurInput`: compose content below the blur layer, then blur). Sibling `SurfaceView`s are PixelCopied and composited in z-order.
+
+```kotlin
+// Put scene content *behind* the blur view in the same window, then:
+blurView.autoCapture = true
+```
+
+This captures this app's window (views + owned surfaces). Other apps / wallpaper need SurfaceFlinger's `Window.setBackgroundBlurRadius`, which uses SF's blur, not this library.
 
 ### Animated blur regions (scrolling wallpaper, moving cards)
 
@@ -120,7 +131,8 @@ blur.detach()          // destroy Vulkan context
 | Method | Description |
 |--------|-------------|
 | `attach(surface)` | Create Vulkan device + swapchain for `surface`. |
-| `setInputBitmap(bitmap)` | Upload ARGB_8888 pixels (max edge 1280). **Required** before `render()`. |
+| `setInputBitmap(bitmap)` | Upload ARGB_8888 pixels (max edge 1280). **Required** before `render()` unless `autoCapture`. |
+| `VulkanBlurView.autoCapture` | Snapshot window layers behind the view each frame (AOSP `blurInput`). |
 | `setBlurRadius(radius)` | Full-frame background blur (`backgroundBlurRadius` when no regions). Scaled by `layerAlpha`. |
 | `setLayerAlpha(alpha)` | Scales effective background blur radius (`color.a * radius`, AOSP `LayerSnapshotBuilder`). |
 | `setBlurAlpha(alpha)` | Compositing alpha when drawing full-frame background blur (`drawBlurRegion` alpha). |
@@ -175,7 +187,7 @@ Shaders: `kawase_down.comp`, `kawase_up.comp`, `kawase_draw.comp`, `kawase_compo
 ./gradlew :app:installDebug
 ```
 
-The demo draws a synthetic wallpaper (`DemoScene` in `:app` only) and exposes three modes:
+The demo puts a wallpaper view behind `VulkanBlurView` and uses `autoCapture` (live window snapshot). Three modes:
 
 - **Test Blur** — full-frame background blur + radius slider
 - **Blur + Alpha** — layer alpha, blur alpha, and blur scale sliders
@@ -193,19 +205,19 @@ The demo draws a synthetic wallpaper (`DemoScene` in `:app` only) and exposes th
 | `BlurRegion` rounded clips | `setBlurRegions` / `BlurRegion` |
 | `blurRegionTransform` | `setBlurRegionTransform` (3×3 affine) |
 | `blurInput` snapshot before region composite | `BlurEngine::copyInputSnapshot` + `KawaseBlur::bindInputSource` |
+| Live window / SurfaceView snapshots | `VulkanBlurView.autoCapture` (`SceneCapture`) |
 | Kawase V2 pyramid | `KawaseBlur` |
 | Blur radius caching (per frame) | Reuses pyramid output when multiple regions share a radius |
 
-**Not in scope for an app/library module** (SurfaceFlinger / full system compositor):
+**Not in scope for an app/library module** (SurfaceFlinger compositor):
 
 - `layerHasBlur` opaque-layer skip (no layer content pipeline)
-- Live multi-layer snapshots (host supplies one bitmap)
-- `Transaction.setBackgroundBlurRadius` / SF integration
-- Actual `SurfaceFlinger` layer ownership, capture, scheduling, and composition policy
+- `Transaction.setBackgroundBlurRadius` / other-app wallpaper capture (privileged `captureDisplay`)
+- Actual `SurfaceFlinger` layer ownership, scheduling, and composition policy
 
 ## Limitations
 
-- **Bitmap in, Surface out** — you supply pixels; capturing behind-glass content is the host app’s job.
+- **Bitmap or auto-capture in, Surface out** — `setInputBitmap` or `autoCapture` of this window. Cross-window wallpaper is SurfaceFlinger `setBackgroundBlurRadius`, not an app PixelCopy.
 - **arm64-v8a** — extend `abiFilters` in `library/build.gradle.kts` to ship other ABIs.
 
 ## License

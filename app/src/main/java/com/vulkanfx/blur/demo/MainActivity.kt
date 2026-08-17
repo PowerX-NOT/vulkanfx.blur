@@ -2,8 +2,6 @@ package com.vulkanfx.blur.demo
 
 import android.app.Activity
 import android.content.res.ColorStateList
-import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Build
@@ -16,12 +14,14 @@ import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.widget.CompoundButton
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
 import android.window.OnBackInvokedCallback
 import com.vulkanfx.blur.BlurRegion
+import com.vulkanfx.blur.VulkanBlur
 import com.vulkanfx.blur.VulkanBlurView
 
 class MainActivity : Activity() {
@@ -229,8 +229,12 @@ class MainActivity : Activity() {
         )
     }
 
-    private fun cardClipRegions(phaseSec: Float = 0f): List<BlurRegion> =
-        DemoScene.cardBlurRegions(radius, phaseSec)
+    private fun cardClipRegions(phaseSec: Float = 0f, viewW: Int = 0, viewH: Int = 0): List<BlurRegion> {
+        val w = if (viewW > 0) viewW else DemoScene.WALLPAPER_WIDTH
+        val h = if (viewH > 0) viewH else DemoScene.WALLPAPER_HEIGHT
+        val (cw, ch) = VulkanBlur.captureSize(w, h)
+        return DemoScene.cardBlurRegions(radius, phaseSec, cw, ch)
+    }
 
     private fun showDemoScreen(
         alphaControls: Boolean = false,
@@ -250,6 +254,15 @@ class MainActivity : Activity() {
             visibility = if (showDeviceInfo) View.VISIBLE else View.GONE
         }
 
+        val wallpaper = if (animateCardClips) {
+            ScrollingWallpaperView(this)
+        } else {
+            ImageView(this).apply {
+                setImageBitmap(DemoScene.wallpaper())
+                scaleType = ImageView.ScaleType.FIT_XY
+            }
+        }
+
         val blurView = VulkanBlurView(this, blurRadius = radius.toFloat()).apply {
             this.debugLevel = debugLevel
             layerAlpha = initialLayerAlpha
@@ -259,18 +272,17 @@ class MainActivity : Activity() {
             if (enableGlassRimToggle) {
                 glassRimEnabled = showGlassRim
             }
-            setInputBitmap(DemoScene.wallpaper())
+            autoCapture = true
             onStatus = { deviceInfo.text = it }
+        }
+        if (blurRegions.isNotEmpty()) {
+            blurView.post {
+                blurView.blurRegions = cardClipRegions(viewW = blurView.width, viewH = blurView.height)
+            }
         }
 
         if (animateCardClips) {
-            val tallWallpaper = DemoScene.tallWallpaper()
-            val frameBitmap = Bitmap.createBitmap(
-                DemoScene.WALLPAPER_WIDTH,
-                DemoScene.WALLPAPER_HEIGHT,
-                Bitmap.Config.ARGB_8888,
-            )
-            val frameCanvas = Canvas(frameBitmap)
+            val scrolling = wallpaper as ScrollingWallpaperView
             var scrollY = 0f
             val animStartNanos = System.nanoTime()
             blurView.onFrameUpdate = {
@@ -278,11 +290,9 @@ class MainActivity : Activity() {
                     blurView.parent == null -> false
                     else -> {
                         scrollY = (scrollY + 2f) % DemoScene.WALLPAPER_HEIGHT
-                        frameCanvas.drawColor(Color.BLACK)
-                        frameCanvas.drawBitmap(tallWallpaper, 0f, -scrollY, null)
-                        blurView.setInputBitmap(frameBitmap)
+                        scrolling.offsetPx = scrollY
                         val phaseSec = (System.nanoTime() - animStartNanos) / 1_000_000_000f
-                        blurView.blurRegions = cardClipRegions(phaseSec)
+                        blurView.blurRegions = cardClipRegions(phaseSec, blurView.width, blurView.height)
                         true
                     }
                 }
@@ -300,7 +310,7 @@ class MainActivity : Activity() {
                     if (!fromUser) return
                     radius = progress.coerceAtLeast(1)
                     if (blurRegions.isNotEmpty()) {
-                        blurView.blurRegions = cardClipRegions()
+                        blurView.blurRegions = cardClipRegions(viewW = blurView.width, viewH = blurView.height)
                     } else {
                         blurView.blurRadius = radius.toFloat()
                     }
@@ -448,6 +458,13 @@ class MainActivity : Activity() {
         }
 
         setContentView(FrameLayout(this).apply {
+            addView(
+                wallpaper,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                ),
+            )
             addView(
                 blurView,
                 FrameLayout.LayoutParams(

@@ -1,5 +1,6 @@
 package com.vulkanfx.blur.demo
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -8,6 +9,7 @@ import android.graphics.Paint
 import android.graphics.RadialGradient
 import android.graphics.Shader
 import android.graphics.Typeface
+import android.view.View
 import com.vulkanfx.blur.BlurRegion
 import kotlin.math.cos
 import kotlin.math.sin
@@ -32,8 +34,16 @@ object DemoScene {
         CardTemplate(28f, 0.85f, 140, 820, 580, 1040),
     )
 
-    /** AOSP-style blurRegions over the 720×1280 demo wallpaper. */
-    fun cardBlurRegions(blurRadius: Int, phaseSec: Float = 0f): List<BlurRegion> {
+    /** AOSP-style blurRegions over a dest-sized snapshot (templates authored at 720×1280). */
+    fun cardBlurRegions(
+        blurRadius: Int,
+        phaseSec: Float = 0f,
+        destW: Int = WALLPAPER_WIDTH,
+        destH: Int = WALLPAPER_HEIGHT,
+    ): List<BlurRegion> {
+        val sx = destW / WALLPAPER_WIDTH.toFloat()
+        val sy = destH / WALLPAPER_HEIGHT.toFloat()
+        val cr = minOf(sx, sy)
         val motion = listOf(
             Pair(sin(phaseSec * 0.7f) * 48f, cos(phaseSec * 0.5f) * 36f),
             Pair(sin(phaseSec * 1.1f + 1f) * 56f, cos(phaseSec * 0.9f + 0.5f) * 32f),
@@ -43,15 +53,15 @@ object DemoScene {
             val (dx, dy) = motion[index]
             BlurRegion(
                 blurRadius = blurRadius,
-                cornerRadiusTL = template.cornerRadius,
-                cornerRadiusTR = template.cornerRadius,
-                cornerRadiusBL = template.cornerRadius,
-                cornerRadiusBR = template.cornerRadius,
+                cornerRadiusTL = template.cornerRadius * cr,
+                cornerRadiusTR = template.cornerRadius * cr,
+                cornerRadiusBL = template.cornerRadius * cr,
+                cornerRadiusBR = template.cornerRadius * cr,
                 alpha = template.alpha,
-                left = (template.left + dx).toInt(),
-                top = (template.top + dy).toInt(),
-                right = (template.right + dx).toInt(),
-                bottom = (template.bottom + dy).toInt(),
+                left = ((template.left + dx) * sx).toInt(),
+                top = ((template.top + dy) * sy).toInt(),
+                right = ((template.right + dx) * sx).toInt(),
+                bottom = ((template.bottom + dy) * sy).toInt(),
             )
         }
     }
@@ -152,5 +162,25 @@ object DemoScene {
                 textSize = width * 0.045f
             },
         )
+    }
+}
+
+/** Live wallpaper behind [com.vulkanfx.blur.VulkanBlurView] so autoCapture has a real scene. */
+class ScrollingWallpaperView(context: Context) : View(context) {
+    private val bitmap = DemoScene.tallWallpaper()
+    var offsetPx = 0f
+        set(value) {
+            field = value
+            invalidate()
+        }
+
+    override fun onDraw(canvas: Canvas) {
+        if (width <= 0 || height <= 0) return
+        val scale = width.toFloat() / bitmap.width
+        canvas.save()
+        canvas.scale(scale, scale)
+        val loop = bitmap.height / 2f
+        canvas.drawBitmap(bitmap, 0f, -(offsetPx % loop), null)
+        canvas.restore()
     }
 }
