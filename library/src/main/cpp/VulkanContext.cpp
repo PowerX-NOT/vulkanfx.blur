@@ -7,6 +7,10 @@
 #include <cstring>
 #include <vector>
 
+static const uint32_t kCopySpv[] =
+#include "copy_comp_spv.inc"
+;
+
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "VulkanBlur", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "VulkanBlur", __VA_ARGS__)
 
@@ -110,6 +114,19 @@ VkPipelineStageFlags mapStage1(VkPipelineStageFlags2 s, bool isSrc) {
     return out;
 }
 
+VkAccessFlags mapAccess1(VkAccessFlags2 a) {
+    VkAccessFlags out = 0;
+    if (a & VK_ACCESS_2_TRANSFER_READ_BIT) out |= VK_ACCESS_TRANSFER_READ_BIT;
+    if (a & VK_ACCESS_2_TRANSFER_WRITE_BIT) out |= VK_ACCESS_TRANSFER_WRITE_BIT;
+    if (a & (VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT)) {
+        out |= VK_ACCESS_SHADER_READ_BIT;
+    }
+    if (a & (VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)) {
+        out |= VK_ACCESS_SHADER_WRITE_BIT;
+    }
+    return out;
+}
+
 constexpr uint32_t kTestSize = 256;
 constexpr uint32_t kTestCell = 32;
 
@@ -188,6 +205,8 @@ VulkanContext::~VulkanContext() {
     if (device_ != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_);
     }
+    destroyCopyPipeline();
+    copyImage_.destroy();
     testImage_.destroy();
     destroySwapchain();
     if (acquireSem_ != VK_NULL_HANDLE) vkDestroySemaphore(device_, acquireSem_, nullptr);
@@ -225,7 +244,9 @@ bool VulkanContext::init(ANativeWindow* window, bool enableValidation) {
     if (!createCommandPool()) return false;
     if (!createSyncObjects()) return false;
     if (!createTestTexture()) return false;
+    if (!createCopyPipeline()) return false;
     if (!uploadTestTexture()) return false;
+    if (!dispatchCopy()) return false;
     if (!createSwapchain()) return false;
     if (swapchainExtent_.width > 0 && swapchainExtent_.height > 0) {
         if (!presentTest()) return false;
@@ -486,8 +507,8 @@ void VulkanContext::barrierImage(VkCommandBuffer cmd, VkImage image,
     }
     VkImageMemoryBarrier b{};
     b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b.srcAccessMask = static_cast<VkAccessFlags>(srcAccess);
-    b.dstAccessMask = static_cast<VkAccessFlags>(dstAccess);
+    b.srcAccessMask = mapAccess1(srcAccess);
+    b.dstAccessMask = mapAccess1(dstAccess);
     b.oldLayout = oldLayout;
     b.newLayout = newLayout;
     b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -502,7 +523,7 @@ void VulkanContext::barrierImage(VkCommandBuffer cmd, VkImage image,
 bool VulkanContext::createTestTexture() {
     return testImage_.create(
             device_, physical_, kTestSize, kTestSize, VK_FORMAT_R8G8B8A8_UNORM,
-            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &error_);
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT, &error_);
 }
 
 bool VulkanContext::uploadTestTexture() {
@@ -553,11 +574,12 @@ bool VulkanContext::uploadTestTexture() {
     region.imageExtent = {testImage_.width, testImage_.height, 1};
     vkCmdCopyBufferToImage(cmd_, staging.buffer, testImage_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-    // Upload finished; later blits read this image. Keep TRANSFER_SRC_OPTIMAL for the rest of Phase 2.
-    // src COPY+TRANSFER_WRITE: the copy above. dst BLIT+TRANSFER_READ: vkCmdBlitImage samples it.
+    // Upload finished. Next pass is a compute storage read, so GENERAL not TRANSFER_SRC.
+    // src COPY+TRANSFER_WRITE: the copy above.
+    // dst COMPUTE+SHADER_STORAGE_READ: imageLoad in copy.comp.
     barrierImage(cmd_, testImage_.image,
                  VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                 VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
 
     VK_TRY(vkEndCommandBuffer(cmd_));
     VkSubmitInfo submit{};
@@ -568,6 +590,157 @@ bool VulkanContext::uploadTestTexture() {
     VK_TRY(vkQueueWaitIdle(queue_));
     staging.destroy();
     vkResetCommandBuffer(cmd_, 0);
+    return true;
+}
+
+bool VulkanContext::createCopyPipeline() {
+    VkFormatProperties fmt{};
+    vkGetPhysicalDeviceFormatProperties(physical_, VK_FORMAT_R8G8B8A8_UNORM, &fmt);
+    if ((fmt.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) == 0) {
+        error_ = "R8G8B8A8_UNORM lacks STORAGE_IMAGE";
+        LOGE("%s", error_.c_str());
+        return false;
+    }
+    if (!copyImage_.create(device_, physical_, kTestSize, kTestSize, VK_FORMAT_R8G8B8A8_UNORM,
+                           VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &error_)) {
+        return false;
+    }
+
+    VkDescriptorSetLayoutBinding binds[2]{};
+    binds[0].binding = 0;
+    binds[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    binds[0].descriptorCount = 1;
+    binds[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    binds[1].binding = 1;
+    binds[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    binds[1].descriptorCount = 1;
+    binds[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    VkDescriptorSetLayoutCreateInfo sl{};
+    sl.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    sl.bindingCount = 2;
+    sl.pBindings = binds;
+    VK_TRY(vkCreateDescriptorSetLayout(device_, &sl, nullptr, &copySetLayout_));
+
+    VkPipelineLayoutCreateInfo pl{};
+    pl.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pl.setLayoutCount = 1;
+    pl.pSetLayouts = &copySetLayout_;
+    VK_TRY(vkCreatePipelineLayout(device_, &pl, nullptr, &copyPipelineLayout_));
+
+    VkShaderModuleCreateInfo sm{};
+    sm.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    sm.codeSize = sizeof(kCopySpv);
+    sm.pCode = kCopySpv;
+    VkShaderModule module = VK_NULL_HANDLE;
+    VK_TRY(vkCreateShaderModule(device_, &sm, nullptr, &module));
+
+    VkPipelineShaderStageCreateInfo stage{};
+    stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    stage.module = module;
+    stage.pName = "main";
+    VkComputePipelineCreateInfo ci{};
+    ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    ci.stage = stage;
+    ci.layout = copyPipelineLayout_;
+    VkResult pipe = vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &ci, nullptr, &copyPipeline_);
+    vkDestroyShaderModule(device_, module, nullptr);
+    if (pipe != VK_SUCCESS) {
+        error_ = std::string("vkCreateComputePipelines -> ") + vkResultName(pipe);
+        LOGE("%s", error_.c_str());
+        return false;
+    }
+
+    VkDescriptorPoolSize poolSize{};
+    poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    poolSize.descriptorCount = 2;
+    VkDescriptorPoolCreateInfo pool{};
+    pool.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool.maxSets = 1;
+    pool.poolSizeCount = 1;
+    pool.pPoolSizes = &poolSize;
+    VK_TRY(vkCreateDescriptorPool(device_, &pool, nullptr, &copyDescPool_));
+
+    VkDescriptorSetAllocateInfo alloc{};
+    alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    alloc.descriptorPool = copyDescPool_;
+    alloc.descriptorSetCount = 1;
+    alloc.pSetLayouts = &copySetLayout_;
+    VK_TRY(vkAllocateDescriptorSets(device_, &alloc, &copyDescSet_));
+
+    VkDescriptorImageInfo images[2]{};
+    images[0].imageView = testImage_.view;
+    images[0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    images[1].imageView = copyImage_.view;
+    images[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkWriteDescriptorSet writes[2]{};
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = copyDescSet_;
+    writes[0].dstBinding = 0;
+    writes[0].descriptorCount = 1;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[0].pImageInfo = &images[0];
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = copyDescSet_;
+    writes[1].dstBinding = 1;
+    writes[1].descriptorCount = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[1].pImageInfo = &images[1];
+    vkUpdateDescriptorSets(device_, 2, writes, 0, nullptr);
+    return true;
+}
+
+void VulkanContext::destroyCopyPipeline() {
+    if (device_ == VK_NULL_HANDLE) return;
+    if (copyPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, copyPipeline_, nullptr);
+    if (copyPipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device_, copyPipelineLayout_, nullptr);
+    if (copyDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(device_, copyDescPool_, nullptr);
+    if (copySetLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device_, copySetLayout_, nullptr);
+    copyPipeline_ = VK_NULL_HANDLE;
+    copyPipelineLayout_ = VK_NULL_HANDLE;
+    copyDescPool_ = VK_NULL_HANDLE;
+    copyDescSet_ = VK_NULL_HANDLE;
+    copySetLayout_ = VK_NULL_HANDLE;
+}
+
+bool VulkanContext::dispatchCopy() {
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VK_TRY(vkBeginCommandBuffer(cmd_, &begin));
+
+    // First use of the compute destination: discard UNDEFINED, make it a storage write target.
+    // src NONE: no prior GPU work on this image.
+    // dst COMPUTE+SHADER_STORAGE_WRITE: imageStore in copy.comp.
+    barrierImage(cmd_, copyImage_.image,
+                 VK_PIPELINE_STAGE_2_NONE, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                 VK_IMAGE_LAYOUT_GENERAL);
+
+    vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, copyPipeline_);
+    vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, copyPipelineLayout_, 0, 1, &copyDescSet_, 0,
+                            nullptr);
+    const uint32_t gx = (copyImage_.width + 15u) / 16u;
+    const uint32_t gy = (copyImage_.height + 15u) / 16u;
+    vkCmdDispatch(cmd_, gx, gy, 1);
+
+    // Compute finished. Blit will read this image.
+    // src COMPUTE+SHADER_STORAGE_WRITE: the dispatch above.
+    // dst BLIT+TRANSFER_READ: vkCmdBlitImage in presentTest.
+    barrierImage(cmd_, copyImage_.image,
+                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                 VK_IMAGE_LAYOUT_GENERAL,
+                 VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+    VK_TRY(vkEndCommandBuffer(cmd_));
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cmd_;
+    VK_TRY(vkQueueSubmit(queue_, 1, &submit, VK_NULL_HANDLE));
+    VK_TRY(vkQueueWaitIdle(queue_));
+    vkResetCommandBuffer(cmd_, 0);
+    LOGI("compute copy dispatched %ux%u groups", gx, gy);
     return true;
 }
 
@@ -720,11 +893,11 @@ bool VulkanContext::presentTest() {
         VkImageBlit blit{};
         blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         blit.srcSubresource.layerCount = 1;
-        blit.srcOffsets[1] = {static_cast<int32_t>(testImage_.width), static_cast<int32_t>(testImage_.height), 1};
+        blit.srcOffsets[1] = {static_cast<int32_t>(copyImage_.width), static_cast<int32_t>(copyImage_.height), 1};
         blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         blit.dstSubresource.layerCount = 1;
         blit.dstOffsets[1] = {static_cast<int32_t>(swapchainExtent_.width), static_cast<int32_t>(swapchainExtent_.height), 1};
-        vkCmdBlitImage(cmd_, testImage_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        vkCmdBlitImage(cmd_, copyImage_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                        swapchainImages_[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                        1, &blit, VK_FILTER_NEAREST);
 
@@ -791,8 +964,8 @@ std::string VulkanContext::info() const {
     const bool timestamps = props_.limits.timestampComputeAndGraphics == VK_TRUE &&
                             props_.limits.timestampPeriod > 0.0f;
     std::string s;
-    s += "VulkanBlur Phase 2\n";
-    s += "status=presented\n";
+    s += "VulkanBlur Phase 3\n";
+    s += "status=compute-copy\n";
     s += "device=";
     s += props_.deviceName;
     s += "\n";
@@ -840,5 +1013,6 @@ std::string VulkanContext::info() const {
     s += "x";
     s += std::to_string(testImage_.height);
     s += " R8G8B8A8_UNORM checker\n";
+    s += "compute=copy.comp 16x16 storage imageLoad/Store\n";
     return s;
 }

@@ -1,0 +1,16 @@
+#version 450
+
+// 16x16 = 256 threads: a typical Adreno/Mali workgroup sweet spot.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba8) readonly uniform image2D src;
+layout(binding = 1, rgba8) writeonly uniform image2D dst;
+
+void main() {
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = imageSize(dst);
+    if (any(greaterThanEqual(p, size))) {
+        return;
+    }
+    imageStore(dst, p, imageLoad(src, p));
+}
