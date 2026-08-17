@@ -39,6 +39,14 @@ class VulkanBlur {
         if (handle != 0L) nativeSetRadius(handle, pendingRadius)
     }
 
+    /**
+     * Pyramid inspect: 0 = final blur, 1 = first downsample, …, N = lowest level.
+     */
+    @Synchronized
+    fun setDebugLevel(level: Int) {
+        if (handle != 0L) nativeSetDebugLevel(handle, level.coerceAtLeast(0))
+    }
+
     /** Re-run Dual Kawase + present. No-op until [attach] has succeeded. */
     @Synchronized
     fun render() {
@@ -78,6 +86,7 @@ class VulkanBlur {
     private external fun nativeReleaseSurface(handle: Long)
     private external fun nativeResize(handle: Long, width: Int, height: Int)
     private external fun nativeSetRadius(handle: Long, radius: Float)
+    private external fun nativeSetDebugLevel(handle: Long, level: Int)
     private external fun nativeRender(handle: Long)
     private external fun nativeInfo(handle: Long): String
     private external fun nativeDownMs(handle: Long): Float

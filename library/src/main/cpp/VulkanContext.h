@@ -19,6 +19,7 @@ public:
     std::string info() const;
     bool resize(uint32_t width, uint32_t height);
     bool setRadius(float radius);
+    bool setDebugLevel(int level);
     bool render();
     void releaseSurface();
     bool setSurface(ANativeWindow* window);
@@ -26,6 +27,7 @@ public:
     float downMs() const { return blur_.downMs(); }
     float upMs() const { return blur_.upMs(); }
     float totalMs() const { return blur_.totalMs(); }
+    int debugLevel() const { return blur_.debugLevel(); }
 
 private:
     VulkanContext() = default;

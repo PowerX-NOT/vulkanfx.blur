@@ -105,6 +105,8 @@ void KawaseBlur::destroy() {
     device_ = VK_NULL_HANDLE;
     srcW_ = srcH_ = 0;
     radius_ = 0.0f;
+    debugLevel_ = 0;
+    preparedDebugLevel_ = -1;
     timestampPeriodNs_ = 0.0f;
     lastDownMs_ = lastUpMs_ = lastTotalMs_ = -1.0f;
 }
@@ -455,6 +457,7 @@ bool KawaseBlur::execute(VkCommandBuffer cmd, VkQueue queue, std::string* error)
     KB_TRY(vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE));
     KB_TRY(vkQueueWaitIdle(queue));
     vkResetCommandBuffer(cmd, 0);
+    preparedDebugLevel_ = -1;
 
     lastDownMs_ = lastUpMs_ = lastTotalMs_ = -1.0f;
     if (queryPool_ != VK_NULL_HANDLE) {
@@ -475,6 +478,55 @@ bool KawaseBlur::execute(VkCommandBuffer cmd, VkQueue queue, std::string* error)
             LOGI("vkGetQueryPoolResults -> %d (timestamps not ready)", static_cast<int>(qr));
         }
     }
+    return true;
+}
+
+void KawaseBlur::setDebugLevel(int level) {
+    if (level < 0) level = 0;
+    const int maxLevel = static_cast<int>(downImages_.size());
+    if (maxLevel > 0 && level > maxLevel) level = maxLevel;
+    if (level != debugLevel_) preparedDebugLevel_ = -1;
+    debugLevel_ = level;
+}
+
+const VulkanImage& KawaseBlur::presentImage() const {
+    if (debugLevel_ <= 0 || downImages_.empty()) return upImages_.back();
+    size_t i = static_cast<size_t>(debugLevel_) - 1;
+    if (i >= downImages_.size()) i = downImages_.size() - 1;
+    return downImages_[i];
+}
+
+bool KawaseBlur::preparePresent(VkCommandBuffer cmd, VkQueue queue, std::string* error) {
+    if (upImages_.empty()) {
+        if (error) *error = "KawaseBlur::preparePresent before execute";
+        return false;
+    }
+    if (debugLevel_ <= 0) {
+        preparedDebugLevel_ = 0;
+        return true;  // final up already TRANSFER_SRC after execute
+    }
+    if (preparedDebugLevel_ == debugLevel_) return true;
+
+    const VulkanImage& img = presentImage();
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    KB_TRY(vkBeginCommandBuffer(cmd, &begin));
+    imageBarrier(cmd, cmdBarrier2_, img.image,
+                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    KB_TRY(vkEndCommandBuffer(cmd));
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cmd;
+    KB_TRY(vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE));
+    KB_TRY(vkQueueWaitIdle(queue));
+    vkResetCommandBuffer(cmd, 0);
+    preparedDebugLevel_ = debugLevel_;
+    LOGI("debug present level=%d %ux%u", debugLevel_, img.width, img.height);
     return true;
 }
 

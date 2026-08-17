@@ -678,6 +678,7 @@ void VulkanContext::destroySwapchain() {
 
 bool VulkanContext::presentTest() {
     if (swapchain_ == VK_NULL_HANDLE || swapchainImages_.empty()) return true;
+    if (blur_.passes() > 0 && !blur_.preparePresent(cmd_, queue_, &error_)) return false;
 
     for (int attempt = 0; attempt < 2; ++attempt) {
         uint32_t index = 0;
@@ -711,7 +712,7 @@ bool VulkanContext::presentTest() {
         VkImageBlit blit{};
         blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         blit.srcSubresource.layerCount = 1;
-        const VulkanImage& src = blur_.output();
+        const VulkanImage& src = blur_.presentImage();
         blit.srcOffsets[1] = {static_cast<int32_t>(src.width), static_cast<int32_t>(src.height), 1};
         blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         blit.dstSubresource.layerCount = 1;
@@ -820,6 +821,11 @@ bool VulkanContext::setRadius(float radius) {
     return presentTest();
 }
 
+bool VulkanContext::setDebugLevel(int level) {
+    blur_.setDebugLevel(level);
+    return presentTest();
+}
+
 bool VulkanContext::render() {
     if (testImage_.image == VK_NULL_HANDLE || blur_.passes() == 0) {
         error_ = "render before working resources";
@@ -834,8 +840,8 @@ std::string VulkanContext::info() const {
     const int w = window_ ? ANativeWindow_getWidth(window_) : 0;
     const int h = window_ ? ANativeWindow_getHeight(window_) : 0;
     std::string s;
-    s += "VulkanBlur Phase 11\n";
-    s += "status=blur\n";
+    s += "VulkanBlur Phase 12\n";
+    s += "status=debug\n";
     s += "device=";
     s += props_.deviceName;
     s += "\n";
@@ -898,6 +904,9 @@ std::string VulkanContext::info() const {
     s += "\n";
     s += "passes=";
     s += std::to_string(blur_.passes());
+    s += "\n";
+    s += "debugLevel=";
+    s += std::to_string(blur_.debugLevel());
     s += "\n";
     s += "offset=";
     s += std::to_string(blur_.offset());

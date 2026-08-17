@@ -83,6 +83,18 @@ Java_com_vulkanfx_blur_VulkanBlur_nativeSetRadius(JNIEnv* env, jobject, jlong ha
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_vulkanfx_blur_VulkanBlur_nativeSetDebugLevel(JNIEnv* env, jobject, jlong handle, jint level) {
+    VulkanContext* ctx = fromHandle(handle);
+    if (!ctx) {
+        throwState(env, "native handle is null");
+        return;
+    }
+    if (!ctx->setDebugLevel(level)) {
+        throwState(env, ctx->lastError().empty() ? "setDebugLevel failed" : ctx->lastError().c_str());
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_vulkanfx_blur_VulkanBlur_nativeRender(JNIEnv* env, jobject, jlong handle) {
     VulkanContext* ctx = fromHandle(handle);
     if (!ctx) {

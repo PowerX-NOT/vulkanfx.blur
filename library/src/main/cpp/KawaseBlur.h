@@ -20,6 +20,11 @@ public:
     bool resize(const VulkanImage& src, std::string* error);
     void destroy();
     bool execute(VkCommandBuffer cmd, VkQueue queue, std::string* error);
+    void setDebugLevel(int level);
+    int debugLevel() const { return debugLevel_; }
+    /** Image to blit: 0 = final up, 1..N = downsample levels. */
+    const VulkanImage& presentImage() const;
+    bool preparePresent(VkCommandBuffer cmd, VkQueue queue, std::string* error);
     const VulkanImage& output() const { return upImages_.back(); }
     float radius() const { return radius_; }
     float offset() const { return offset_; }
@@ -47,6 +52,8 @@ private:
     uint32_t queueFamily_ = 0;
     float radius_ = 0.0f;
     float offset_ = 1.0f;
+    int debugLevel_ = 0;
+    int preparedDebugLevel_ = -1;
     float timestampPeriodNs_ = 0.0f;
     float lastDownMs_ = -1.0f;
     float lastUpMs_ = -1.0f;

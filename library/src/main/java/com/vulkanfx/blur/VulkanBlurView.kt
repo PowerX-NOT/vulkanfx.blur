@@ -32,6 +32,19 @@ class VulkanBlurView @JvmOverloads constructor(
             }
         }
 
+    /** 0 = final blur output; 1..N = downsample pyramid levels. */
+    var debugLevel: Int = 0
+        set(value) {
+            field = value.coerceAtLeast(0)
+            try {
+                blur.setDebugLevel(field)
+                if (blur.isReady) onStatus?.invoke(blur.info())
+            } catch (e: IllegalStateException) {
+                Log.e(TAG, "Vulkan setDebugLevel failed", e)
+                onStatus?.invoke("VulkanBlur setDebugLevel failed:\n${e.message}")
+            }
+        }
+
     private val blur = VulkanBlur()
 
     init {
