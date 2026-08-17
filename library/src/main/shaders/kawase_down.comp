@@ -5,15 +5,13 @@ layout(local_size_x = 16, local_size_y = 16) in;
 layout(binding = 0) uniform sampler2D src;
 layout(binding = 1, rgba8) writeonly uniform image2D dst;
 
-// texelSize = 1 / source resolution
-// offset    = Kawase radius in source texels (1.0 for the first downsample)
-// intensity = scale on the weighted sum (1.0 = energy-preserving)
-// resolution = destination size in pixels
+// kind 0: 4x downsample, 4 diamond taps at ±0.25 dest px (RenderEngine V2 quarter)
+// kind 1: 2x downsample, center*4 + 4 taps at ±0.5 dest px (V2 half)
 layout(push_constant) uniform Params {
-    vec2 texelSize;
-    float offset;
-    float intensity;
     vec2 resolution;
+    float offset;
+    float alpha;
+    int kind;
 } p;
 
 void main() {
@@ -22,20 +20,21 @@ void main() {
         return;
     }
 
-    // Dest pixel center in normalized UV. With dest = src/2 this lands on the
-    // center of the 2x2 source block this pixel represents.
     const vec2 uv = (vec2(dstPixel) + 0.5) / p.resolution;
-
-    // Dual Kawase downsample (5 taps):
-    //   center  * 4/8
-    //   four diagonals at ±(texelSize * offset) each * 1/8
-    // Linear filtering + the extra diagonal taps approximate a wider box
-    // without a 9-sample kernel. textureLod: compute has no derivatives.
-    const vec2 o = p.texelSize * p.offset;
-    vec4 c = textureLod(src, uv, 0.0) * 4.0;
-    c += textureLod(src, uv + vec2(-o.x, -o.y), 0.0);
-    c += textureLod(src, uv + vec2(o.x, -o.y), 0.0);
-    c += textureLod(src, uv + vec2(-o.x, o.y), 0.0);
-    c += textureLod(src, uv + vec2(o.x, o.y), 0.0);
-    imageStore(dst, dstPixel, c * (0.125 * p.intensity));
+    if (p.kind == 0) {
+        const vec2 o = vec2(0.25) / p.resolution;
+        vec3 c = textureLod(src, uv + vec2(o.x, o.y), 0.0).rgb;
+        c += textureLod(src, uv + vec2(o.x, -o.y), 0.0).rgb;
+        c += textureLod(src, uv + vec2(-o.x, -o.y), 0.0).rgb;
+        c += textureLod(src, uv + vec2(-o.x, o.y), 0.0).rgb;
+        imageStore(dst, dstPixel, vec4(c * 0.25, 1.0));
+    } else {
+        const vec2 o = vec2(0.5) / p.resolution;
+        vec3 c = textureLod(src, uv, 0.0).rgb * 4.0;
+        c += textureLod(src, uv + vec2(o.x, o.y), 0.0).rgb;
+        c += textureLod(src, uv + vec2(o.x, -o.y), 0.0).rgb;
+        c += textureLod(src, uv + vec2(-o.x, -o.y), 0.0).rgb;
+        c += textureLod(src, uv + vec2(-o.x, o.y), 0.0).rgb;
+        imageStore(dst, dstPixel, vec4(c * 0.125, 1.0));
+    }
 }

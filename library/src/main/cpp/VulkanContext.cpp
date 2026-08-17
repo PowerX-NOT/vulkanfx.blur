@@ -751,7 +751,7 @@ bool VulkanContext::presentTest() {
         blit.dstOffsets[1] = {static_cast<int32_t>(swapchainExtent_.width), static_cast<int32_t>(swapchainExtent_.height), 1};
         vkCmdBlitImage(cmd_, src.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                        swapchainImages_[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                       1, &blit, VK_FILTER_NEAREST);
+                       1, &blit, VK_FILTER_LINEAR);
 
         // Blit done. Present requires PRESENT_SRC_KHR. dst NONE: no later GPU work in this submit;
         // the present semaphore is signaled when this command buffer completes.

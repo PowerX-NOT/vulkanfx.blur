@@ -53,6 +53,7 @@ endmacro()
 
 embed_comp(kawase_down)
 embed_comp(kawase_up)
+embed_comp(kawase_draw)
 set_source_files_properties(KawaseBlur.cpp PROPERTIES OBJECT_DEPENDS "${_shader_incs}")
 add_custom_target(shaders DEPENDS ${_shader_incs})
 add_dependencies(vulkanblur shaders)

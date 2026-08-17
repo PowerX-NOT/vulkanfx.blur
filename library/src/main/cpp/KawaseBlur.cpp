@@ -13,6 +13,9 @@ static const uint32_t kDownSpv[] =
 static const uint32_t kUpSpv[] =
 #include "kawase_up_comp_spv.inc"
         ;
+static const uint32_t kDrawSpv[] =
+#include "kawase_draw_comp_spv.inc"
+        ;
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "VulkanBlur", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "VulkanBlur", __VA_ARGS__)
@@ -20,37 +23,53 @@ static const uint32_t kUpSpv[] =
 namespace {
 
 struct KawasePush {
-    float texelX, texelY;
-    float offset;
-    float intensity;
     float resX, resY;
+    float offset;
+    float alpha;
+    int32_t kind;
 };
-static_assert(sizeof(KawasePush) == 24, "push constant layout");
+static_assert(sizeof(KawasePush) == 20, "push constant layout");
 
 struct KawaseMapped {
-    uint32_t passes;
-    float offset;
+    uint32_t extraPasses;
+    float step;
+    float depth;
 };
 
-// Dual Kawase: each extra level doubles source-space kernel (~2^levels px).
-// floor(log2(r)) matches 5→2, 10→3, 20→4, 40→5. Fractional log2 scales offset in [1,2).
-// ponytail: cap 6 levels; bigger radius only raises offset, not more mips.
-KawaseMapped mapRadius(float radius, uint32_t minDim) {
-    uint32_t maxPasses = 0;
-    for (uint32_t d = minDim; d > 1 && maxPasses < 6; d /= 2) ++maxPasses;
-    if (maxPasses < 1) maxPasses = 1;
-    const float lg = std::log2(std::max(radius, 1.0f));
-    uint32_t passes = static_cast<uint32_t>(std::floor(lg));
-    if (passes < 1) passes = 1;
-    if (passes > maxPasses) passes = maxPasses;
-    return {passes, 1.0f + (lg - std::floor(lg))};
+// RenderEngine KawaseBlurDualFilterV2::generate — same constants and step solve.
+constexpr float kSigmaScale = 0.57735f;
+constexpr float kInputScale = 0.25f;
+constexpr float kInverseInputScale = 4.0f;
+constexpr int kMaxSurfaces = 4;
+constexpr float kMaxCrossFadeRadius = 10.0f;
+
+KawaseMapped mapRadius(float blurRadius) {
+    const float radius = blurRadius * kSigmaScale;
+    const float depth = std::min(static_cast<float>(kMaxSurfaces - 1), radius * kInputScale / 2.5f);
+    const uint32_t extra = static_cast<uint32_t>(
+            std::min(kMaxSurfaces - 1, static_cast<int>(std::ceil(depth))));
+
+    float sumSquaredR = 0.0f;
+    float sumSquaredStep = 0.0f;
+    for (uint32_t i = 0; i < extra; ++i) {
+        const float alpha = std::min(1.0f, depth - static_cast<float>(i));
+        sumSquaredR += std::pow(std::pow(2.0f, static_cast<float>(i) - 1.0f) * alpha * std::sqrt(2.0f),
+                                2.0f);
+        sumSquaredStep += std::pow(std::pow(2.0f, static_cast<float>(i)) * alpha, 2.0f);
+    }
+    const float target = radius * kInputScale;
+    const float step = std::sqrt(std::max(0.0f, target * target - sumSquaredR) /
+                                 (sumSquaredStep == 0.0f ? 1.0f : sumSquaredStep));
+    return {extra, step, depth};
 }
 
 void checkRadiusMap() {
-    if (mapRadius(5, 256).passes != 2 || mapRadius(10, 256).passes != 3 ||
-        mapRadius(20, 256).passes != 4 || mapRadius(40, 256).passes != 5 ||
-        mapRadius(1, 256).passes != 1) {
-        LOGE("mapRadius self-check failed");
+    const KawaseMapped m24 = mapRadius(24);
+    const KawaseMapped m1 = mapRadius(1);
+    const KawaseMapped m64 = mapRadius(64);
+    if (m24.extraPasses != 2 || m1.extraPasses != 1 || m64.extraPasses != 3) {
+        LOGE("mapRadius self-check failed extra 24=%u 1=%u 64=%u", m24.extraPasses, m1.extraPasses,
+             m64.extraPasses);
     }
 }
 
@@ -79,10 +98,12 @@ void KawaseBlur::destroyPyramid() {
     }
     for (auto& img : upImages_) img.destroy();
     for (auto& img : downImages_) img.destroy();
+    drawImage_.destroy();
     upImages_.clear();
     downImages_.clear();
     downSets_.clear();
     upSets_.clear();
+    drawSet_ = VK_NULL_HANDLE;
 }
 
 void KawaseBlur::destroy() {
@@ -90,17 +111,21 @@ void KawaseBlur::destroy() {
     destroyPyramid();
     if (queryPool_ != VK_NULL_HANDLE) vkDestroyQueryPool(device_, queryPool_, nullptr);
     if (fence_ != VK_NULL_HANDLE) vkDestroyFence(device_, fence_, nullptr);
+    if (drawPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, drawPipeline_, nullptr);
     if (upPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, upPipeline_, nullptr);
     if (downPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, downPipeline_, nullptr);
     if (pipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
     if (setLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device_, setLayout_, nullptr);
+    if (samplerMirror_ != VK_NULL_HANDLE) vkDestroySampler(device_, samplerMirror_, nullptr);
     if (sampler_ != VK_NULL_HANDLE) vkDestroySampler(device_, sampler_, nullptr);
     queryPool_ = VK_NULL_HANDLE;
     fence_ = VK_NULL_HANDLE;
+    drawPipeline_ = VK_NULL_HANDLE;
     upPipeline_ = VK_NULL_HANDLE;
     downPipeline_ = VK_NULL_HANDLE;
     pipelineLayout_ = VK_NULL_HANDLE;
     setLayout_ = VK_NULL_HANDLE;
+    samplerMirror_ = VK_NULL_HANDLE;
     sampler_ = VK_NULL_HANDLE;
     cmdBarrier2_ = nullptr;
     physical_ = VK_NULL_HANDLE;
@@ -140,14 +165,18 @@ bool KawaseBlur::createComputePipeline(const uint32_t* spv, size_t bytes, VkPipe
     return true;
 }
 
-void KawaseBlur::writeSet(VkDescriptorSet set, VkImageView src, VkImageView dst) {
-    VkDescriptorImageInfo images[2]{};
-    images[0].sampler = sampler_;
+void KawaseBlur::writeSet(VkDescriptorSet set, VkImageView src, VkImageView dst, VkImageView mix,
+                          VkSampler sampler) {
+    VkDescriptorImageInfo images[3]{};
+    images[0].sampler = sampler;
     images[0].imageView = src;
     images[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     images[1].imageView = dst;
     images[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    VkWriteDescriptorSet writes[2]{};
+    images[2].sampler = sampler;
+    images[2].imageView = mix;
+    images[2].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet writes[3]{};
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = set;
     writes[0].dstBinding = 0;
@@ -160,7 +189,13 @@ void KawaseBlur::writeSet(VkDescriptorSet set, VkImageView src, VkImageView dst)
     writes[1].descriptorCount = 1;
     writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[1].pImageInfo = &images[1];
-    vkUpdateDescriptorSets(device_, 2, writes, 0, nullptr);
+    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[2].dstSet = set;
+    writes[2].dstBinding = 2;
+    writes[2].descriptorCount = 1;
+    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[2].pImageInfo = &images[2];
+    vkUpdateDescriptorSets(device_, 3, writes, 0, nullptr);
 }
 
 bool KawaseBlur::ensurePipelines(std::string* error) {
@@ -189,8 +224,10 @@ bool KawaseBlur::ensurePipelines(std::string* error) {
     sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sci.maxLod = 0.0f;
     KB_TRY(vkCreateSampler(device_, &sci, nullptr, &sampler_));
+    sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+    KB_TRY(vkCreateSampler(device_, &sci, nullptr, &samplerMirror_));
 
-    VkDescriptorSetLayoutBinding binds[2]{};
+    VkDescriptorSetLayoutBinding binds[3]{};
     binds[0].binding = 0;
     binds[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     binds[0].descriptorCount = 1;
@@ -199,9 +236,13 @@ bool KawaseBlur::ensurePipelines(std::string* error) {
     binds[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     binds[1].descriptorCount = 1;
     binds[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    binds[2].binding = 2;
+    binds[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    binds[2].descriptorCount = 1;
+    binds[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     VkDescriptorSetLayoutCreateInfo sl{};
     sl.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    sl.bindingCount = 2;
+    sl.bindingCount = 3;
     sl.pBindings = binds;
     KB_TRY(vkCreateDescriptorSetLayout(device_, &sl, nullptr, &setLayout_));
 
@@ -219,6 +260,7 @@ bool KawaseBlur::ensurePipelines(std::string* error) {
 
     if (!createComputePipeline(kDownSpv, sizeof(kDownSpv), &downPipeline_, error)) return false;
     if (!createComputePipeline(kUpSpv, sizeof(kUpSpv), &upPipeline_, error)) return false;
+    if (!createComputePipeline(kDrawSpv, sizeof(kDrawSpv), &drawPipeline_, error)) return false;
     return true;
 }
 
@@ -277,73 +319,85 @@ void KawaseBlur::writeTimestamp(VkCommandBuffer cmd, uint32_t query) {
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool_, query);
 }
 
-bool KawaseBlur::rebuildPyramid(const VulkanImage& src, uint32_t passes, std::string* error) {
+bool KawaseBlur::rebuildPyramid(const VulkanImage& src, uint32_t extraPasses, std::string* error) {
     destroyPyramid();
     srcW_ = src.width;
     srcH_ = src.height;
 
     const VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    downImages_.resize(passes);
-    uint32_t w = srcW_;
-    uint32_t h = srcH_;
-    for (uint32_t i = 0; i < passes; ++i) {
-        w = std::max(1u, w / 2);
-        h = std::max(1u, h / 2);
+    // V2: surfaces[i] = size / ((1<<i) * 4), i.e. 4x, 8x, 16x, 32x from source.
+    const uint32_t nDown = extraPasses + 1;
+    downImages_.resize(nDown);
+    for (uint32_t i = 0; i < nDown; ++i) {
+        const float scale = static_cast<float>(1u << i) * kInverseInputScale;
+        const uint32_t w = std::max(1u, static_cast<uint32_t>(static_cast<float>(srcW_) / scale));
+        const uint32_t h = std::max(1u, static_cast<uint32_t>(static_cast<float>(srcH_) / scale));
         if (!downImages_[i].create(device_, physical_, w, h, VK_FORMAT_R8G8B8A8_UNORM, usage, error)) {
             return false;
         }
     }
-    upImages_.resize(passes);
-    for (uint32_t i = 0; i < passes; ++i) {
-        uint32_t outW;
-        uint32_t outH;
-        if (i + 1 == passes) {
-            // Exact source size — doubling alone loses a pixel on odd dims (581→290→580).
-            outW = srcW_;
-            outH = srcH_;
-        } else {
-            const VulkanImage& prev = (i == 0) ? downImages_.back() : upImages_[i - 1];
-            outW = prev.width * 2;
-            outH = prev.height * 2;
-        }
-        if (!upImages_[i].create(device_, physical_, outW, outH, VK_FORMAT_R8G8B8A8_UNORM, usage, error)) {
+    upImages_.resize(extraPasses);
+    for (uint32_t i = 0; i < extraPasses; ++i) {
+        const VulkanImage& mix = downImages_[extraPasses - 1 - i];
+        if (!upImages_[i].create(device_, physical_, mix.width, mix.height, VK_FORMAT_R8G8B8A8_UNORM,
+                                 usage, error)) {
             return false;
         }
     }
+    if (!drawImage_.create(device_, physical_, srcW_, srcH_, VK_FORMAT_R8G8B8A8_UNORM, usage, error)) {
+        return false;
+    }
 
+    const uint32_t nSets = nDown + extraPasses + 1;
     VkDescriptorPoolSize poolSizes[2]{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[0].descriptorCount = passes * 2;
+    poolSizes[0].descriptorCount = nSets * 2;
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    poolSizes[1].descriptorCount = passes * 2;
+    poolSizes[1].descriptorCount = nSets;
     VkDescriptorPoolCreateInfo pool{};
     pool.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool.maxSets = passes * 2;
+    pool.maxSets = nSets;
     pool.poolSizeCount = 2;
     pool.pPoolSizes = poolSizes;
     KB_TRY(vkCreateDescriptorPool(device_, &pool, nullptr, &descPool_));
 
-    std::vector<VkDescriptorSetLayout> layouts(passes, setLayout_);
-    VkDescriptorSetAllocateInfo alloc{};
-    alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    alloc.descriptorPool = descPool_;
-    alloc.descriptorSetCount = passes;
-    alloc.pSetLayouts = layouts.data();
-    downSets_.resize(passes);
-    KB_TRY(vkAllocateDescriptorSets(device_, &alloc, downSets_.data()));
-    upSets_.resize(passes);
-    KB_TRY(vkAllocateDescriptorSets(device_, &alloc, upSets_.data()));
+    auto allocSets = [&](uint32_t n, std::vector<VkDescriptorSet>* out) -> bool {
+        if (n == 0) {
+            out->clear();
+            return true;
+        }
+        std::vector<VkDescriptorSetLayout> layouts(n, setLayout_);
+        VkDescriptorSetAllocateInfo alloc{};
+        alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        alloc.descriptorPool = descPool_;
+        alloc.descriptorSetCount = n;
+        alloc.pSetLayouts = layouts.data();
+        out->resize(n);
+        KB_TRY(vkAllocateDescriptorSets(device_, &alloc, out->data()));
+        return true;
+    };
+    if (!allocSets(nDown, &downSets_)) return false;
+    if (!allocSets(extraPasses, &upSets_)) return false;
+    {
+        std::vector<VkDescriptorSet> drawSets;
+        if (!allocSets(1, &drawSets)) return false;
+        drawSet_ = drawSets[0];
+    }
 
-    for (uint32_t i = 0; i < passes; ++i) {
+    for (uint32_t i = 0; i < nDown; ++i) {
         const VulkanImage& in = (i == 0) ? src : downImages_[i - 1];
-        writeSet(downSets_[i], in.view, downImages_[i].view);
+        writeSet(downSets_[i], in.view, downImages_[i].view, in.view, sampler_);
     }
-    for (uint32_t i = 0; i < passes; ++i) {
+    for (uint32_t i = 0; i < extraPasses; ++i) {
         const VulkanImage& in = (i == 0) ? downImages_.back() : upImages_[i - 1];
-        writeSet(upSets_[i], in.view, upImages_[i].view);
+        const VulkanImage& mix = downImages_[extraPasses - 1 - i];
+        writeSet(upSets_[i], in.view, upImages_[i].view, mix.view, sampler_);
     }
-    LOGI("kawase rebuild %ux%u passes=%u offset=%.2f", srcW_, srcH_, passes, offset_);
+    const VulkanImage& blurOut = extraPasses > 0 ? upImages_.back() : downImages_.front();
+    writeSet(drawSet_, blurOut.view, drawImage_.view, src.view, samplerMirror_);
+    LOGI("kawase2 rebuild %ux%u extra=%u step=%.2f depth=%.2f", srcW_, srcH_, extraPasses, step_,
+         filterDepth_);
     return true;
 }
 
@@ -357,12 +411,13 @@ bool KawaseBlur::create(VkDevice device, VkPhysicalDevice physical, const Vulkan
     queueFamily_ = queueFamily;
     cmdBarrier2_ = cmdBarrier2;
     radius_ = radius;
-    const KawaseMapped mapped = mapRadius(radius, std::min(src.width, src.height));
-    offset_ = mapped.offset;
+    const KawaseMapped mapped = mapRadius(radius);
+    step_ = mapped.step;
+    filterDepth_ = mapped.depth;
     if (!ensurePipelines(error)) return false;
     if (!ensureQueryPool(error)) return false;
     if (!ensureFence(error)) return false;
-    return rebuildPyramid(src, mapped.passes, error);
+    return rebuildPyramid(src, mapped.extraPasses, error);
 }
 
 bool KawaseBlur::setRadius(float radius, const VulkanImage& src, std::string* error) {
@@ -370,13 +425,14 @@ bool KawaseBlur::setRadius(float radius, const VulkanImage& src, std::string* er
         if (error) *error = "KawaseBlur::setRadius before create";
         return false;
     }
-    const KawaseMapped mapped = mapRadius(radius, std::min(src.width, src.height));
+    const KawaseMapped mapped = mapRadius(radius);
     radius_ = radius;
-    offset_ = mapped.offset;
-    if (mapped.passes == downImages_.size() && src.width == srcW_ && src.height == srcH_) {
+    step_ = mapped.step;
+    filterDepth_ = mapped.depth;
+    if (mapped.extraPasses + 1 == downImages_.size() && src.width == srcW_ && src.height == srcH_) {
         return true;
     }
-    return rebuildPyramid(src, mapped.passes, error);
+    return rebuildPyramid(src, mapped.extraPasses, error);
 }
 
 bool KawaseBlur::resize(const VulkanImage& src, std::string* error) {
@@ -385,9 +441,10 @@ bool KawaseBlur::resize(const VulkanImage& src, std::string* error) {
         return false;
     }
     if (src.width == srcW_ && src.height == srcH_) return true;
-    const KawaseMapped mapped = mapRadius(radius_, std::min(src.width, src.height));
-    offset_ = mapped.offset;
-    return rebuildPyramid(src, mapped.passes, error);
+    const KawaseMapped mapped = mapRadius(radius_);
+    step_ = mapped.step;
+    filterDepth_ = mapped.depth;
+    return rebuildPyramid(src, mapped.extraPasses, error);
 }
 
 bool KawaseBlur::execute(VkCommandBuffer cmd, VkQueue queue, std::string* error) {
@@ -401,9 +458,9 @@ bool KawaseBlur::execute(VkCommandBuffer cmd, VkQueue queue, std::string* error)
         writeTimestamp(cmd, kTsStart);
     }
 
-    const uint32_t passes = static_cast<uint32_t>(downImages_.size());
+    const uint32_t nDown = static_cast<uint32_t>(downImages_.size());
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, downPipeline_);
-    for (uint32_t i = 0; i < passes; ++i) {
+    for (uint32_t i = 0; i < nDown; ++i) {
         const uint32_t srcW = (i == 0) ? srcW_ : downImages_[i - 1].width;
         const uint32_t srcH = (i == 0) ? srcH_ : downImages_[i - 1].height;
         VulkanImage& dst = downImages_[i];
@@ -416,12 +473,9 @@ bool KawaseBlur::execute(VkCommandBuffer cmd, VkQueue queue, std::string* error)
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_, 0, 1,
                                 &downSets_[i], 0, nullptr);
         KawasePush push{};
-        push.texelX = 1.0f / static_cast<float>(srcW);
-        push.texelY = 1.0f / static_cast<float>(srcH);
-        push.offset = offset_;
-        push.intensity = 1.0f;
         push.resX = static_cast<float>(dst.width);
         push.resY = static_cast<float>(dst.height);
+        push.kind = (i == 0) ? 0 : 1;
         vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
         vkCmdDispatch(cmd, (dst.width + 15u) / 16u, (dst.height + 15u) / 16u, 1);
 
@@ -430,14 +484,17 @@ bool KawaseBlur::execute(VkCommandBuffer cmd, VkQueue queue, std::string* error)
                      VK_IMAGE_LAYOUT_GENERAL,
                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        LOGI("kawase down[%u] %ux%u -> %ux%u", i, srcW, srcH, dst.width, dst.height);
+        LOGI("kawase2 down[%u] kind=%d %ux%u -> %ux%u", i, push.kind, srcW, srcH, dst.width, dst.height);
     }
     writeTimestamp(cmd, kTsAfterDown);
 
+    const uint32_t extra = static_cast<uint32_t>(upImages_.size());
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, upPipeline_);
-    for (uint32_t i = 0; i < passes; ++i) {
+    for (uint32_t i = 0; i < extra; ++i) {
         const VulkanImage& src = (i == 0) ? downImages_.back() : upImages_[i - 1];
         VulkanImage& dst = upImages_[i];
+        const uint32_t v2Index = extra - 1 - i;
+        const float alpha = std::min(1.0f, filterDepth_ - static_cast<float>(v2Index));
 
         imageBarrier(cmd, cmdBarrier2_, dst.image,
                      VK_PIPELINE_STAGE_2_NONE, 0, VK_IMAGE_LAYOUT_UNDEFINED,
@@ -447,30 +504,43 @@ bool KawaseBlur::execute(VkCommandBuffer cmd, VkQueue queue, std::string* error)
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_, 0, 1,
                                 &upSets_[i], 0, nullptr);
         KawasePush push{};
-        push.texelX = 1.0f / static_cast<float>(src.width);
-        push.texelY = 1.0f / static_cast<float>(src.height);
-        push.offset = offset_;
-        push.intensity = 1.0f;
         push.resX = static_cast<float>(dst.width);
         push.resY = static_cast<float>(dst.height);
+        push.offset = step_;
+        push.alpha = alpha;
         vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
         vkCmdDispatch(cmd, (dst.width + 15u) / 16u, (dst.height + 15u) / 16u, 1);
 
-        if (i + 1 < passes) {
-            imageBarrier(cmd, cmdBarrier2_, dst.image,
-                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                         VK_IMAGE_LAYOUT_GENERAL,
-                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        } else {
-            imageBarrier(cmd, cmdBarrier2_, dst.image,
-                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                         VK_IMAGE_LAYOUT_GENERAL,
-                         VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
-                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-        }
-        LOGI("kawase up[%u] %ux%u -> %ux%u", i, src.width, src.height, dst.width, dst.height);
+        imageBarrier(cmd, cmdBarrier2_, dst.image,
+                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_GENERAL,
+                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        LOGI("kawase2 up[%u] %ux%u -> %ux%u alpha=%.2f", i, src.width, src.height, dst.width, dst.height,
+             alpha);
     }
+
+    // BlurFilter::drawBlurRegion: 4x linear+mirror upsample, mix original if radius < 10.
+    imageBarrier(cmd, cmdBarrier2_, drawImage_.image,
+                 VK_PIPELINE_STAGE_2_NONE, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                 VK_IMAGE_LAYOUT_GENERAL);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, drawPipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_, 0, 1, &drawSet_, 0,
+                            nullptr);
+    KawasePush drawPush{};
+    drawPush.resX = static_cast<float>(drawImage_.width);
+    drawPush.resY = static_cast<float>(drawImage_.height);
+    drawPush.alpha = std::min(1.0f, radius_ / kMaxCrossFadeRadius);
+    vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(drawPush),
+                       &drawPush);
+    vkCmdDispatch(cmd, (drawImage_.width + 15u) / 16u, (drawImage_.height + 15u) / 16u, 1);
+    imageBarrier(cmd, cmdBarrier2_, drawImage_.image,
+                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                 VK_IMAGE_LAYOUT_GENERAL,
+                 VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
     writeTimestamp(cmd, kTsEnd);
 
     KB_TRY(vkEndCommandBuffer(cmd));
@@ -491,7 +561,7 @@ bool KawaseBlur::execute(VkCommandBuffer cmd, VkQueue queue, std::string* error)
             lastUpMs_ = static_cast<float>(upNs / 1.0e6);
             lastTotalMs_ = static_cast<float>(totalNs / 1.0e6);
             LOGI("VulkanBlur: resolution=%ux%u levels=%u downsample=%.3fms upsample=%.3fms total=%.3fms",
-                 srcW_, srcH_, passes, lastDownMs_, lastUpMs_, lastTotalMs_);
+                 srcW_, srcH_, nDown, lastDownMs_, lastUpMs_, lastTotalMs_);
         } else {
             LOGI("vkGetQueryPoolResults -> %d (timestamps not ready)", static_cast<int>(qr));
         }
@@ -508,20 +578,22 @@ void KawaseBlur::setDebugLevel(int level) {
 }
 
 const VulkanImage& KawaseBlur::presentImage() const {
-    if (debugLevel_ <= 0 || downImages_.empty()) return upImages_.back();
-    size_t i = static_cast<size_t>(debugLevel_) - 1;
-    if (i >= downImages_.size()) i = downImages_.size() - 1;
-    return downImages_[i];
+    if (debugLevel_ > 0 && !downImages_.empty()) {
+        size_t i = static_cast<size_t>(debugLevel_) - 1;
+        if (i >= downImages_.size()) i = downImages_.size() - 1;
+        return downImages_[i];
+    }
+    return drawImage_;
 }
 
 bool KawaseBlur::preparePresent(VkCommandBuffer cmd, VkQueue queue, std::string* error) {
-    if (upImages_.empty()) {
+    if (downImages_.empty()) {
         if (error) *error = "KawaseBlur::preparePresent before execute";
         return false;
     }
     if (debugLevel_ <= 0) {
         preparedDebugLevel_ = 0;
-        return true;  // final up already TRANSFER_SRC after execute
+        return true;  // drawImage_ already TRANSFER_SRC after execute
     }
     if (preparedDebugLevel_ == debugLevel_) return true;
 
@@ -556,5 +628,9 @@ std::string KawaseBlur::pyramidInfo() const {
         s += "x";
         s += std::to_string(img.height);
     }
+    s += " => ";
+    s += std::to_string(drawImage_.width);
+    s += "x";
+    s += std::to_string(drawImage_.height);
     return s;
 }

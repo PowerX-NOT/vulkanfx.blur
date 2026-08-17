@@ -1,0 +1,26 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform sampler2D blurred;
+layout(binding = 1, rgba8) writeonly uniform image2D dst;
+layout(binding = 2) uniform sampler2D original;
+
+// BlurFilter::drawBlurRegion: 4x linear + mirror upsample, mix with sharp original when radius < 10.
+layout(push_constant) uniform Params {
+    vec2 resolution;
+    float offset;
+    float mixFactor;
+    int kind;
+} p;
+
+void main() {
+    const ivec2 dstPixel = ivec2(gl_GlobalInvocationID.xy);
+    if (dstPixel.x >= int(p.resolution.x) || dstPixel.y >= int(p.resolution.y)) {
+        return;
+    }
+    const vec2 uv = (vec2(dstPixel) + 0.5) / p.resolution;
+    const vec3 blurredC = textureLod(blurred, uv, 0.0).rgb;
+    const vec3 originalC = textureLod(original, uv, 0.0).rgb;
+    imageStore(dst, dstPixel, vec4(mix(originalC, blurredC, p.mixFactor), 1.0));
+}

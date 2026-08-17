@@ -4,17 +4,24 @@ layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(binding = 0) uniform sampler2D src;
 layout(binding = 1, rgba8) writeonly uniform image2D dst;
+layout(binding = 2) uniform sampler2D mixSrc;
 
-// texelSize = 1 / source (smaller) resolution
-// offset    = Kawase radius in source texels
-// intensity = scale (1.0 = energy-preserving)
-// resolution = destination (larger) size in pixels
+// 8-tap regular heptagon + center (RenderEngine KawaseBlurDualFilterV2 upsample).
+// Returns premul rgb (c * alpha * 0.125, alpha) and SrcOvers onto mixSrc (the downsample).
 layout(push_constant) uniform Params {
-    vec2 texelSize;
-    float offset;
-    float intensity;
     vec2 resolution;
+    float offset;
+    float alpha;
+    int kind;
 } p;
+
+const vec2 STEP_0 = vec2(1.0, 0.0);
+const vec2 STEP_1 = vec2(0.623489802, 0.781831482);
+const vec2 STEP_2 = vec2(-0.222520934, 0.974927912);
+const vec2 STEP_3 = vec2(-0.900968868, 0.433883739);
+const vec2 STEP_4 = vec2(0.900968868, -0.433883739);
+const vec2 STEP_5 = vec2(-0.222520934, -0.974927912);
+const vec2 STEP_6 = vec2(-0.623489802, -0.781831482);
 
 void main() {
     const ivec2 dstPixel = ivec2(gl_GlobalInvocationID.xy);
@@ -22,22 +29,21 @@ void main() {
         return;
     }
 
-    // Dest pixel center in shared UV space. With dest = 2*src this reconstructs
-    // the finer grid from the coarser level.
     const vec2 uv = (vec2(dstPixel) + 0.5) / p.resolution;
-    const vec2 o = p.texelSize * p.offset;
-
-    // Dual Kawase upsample (8 taps, weights sum to 12):
-    //   4 axis samples at 2*o, weight 1
-    //   4 diagonal samples at 1*o, weight 2
-    // textureLod: compute has no derivatives.
-    vec4 c = textureLod(src, uv + vec2(-2.0 * o.x, 0.0), 0.0);
-    c += textureLod(src, uv + vec2(-o.x, o.y), 0.0) * 2.0;
-    c += textureLod(src, uv + vec2(0.0, 2.0 * o.y), 0.0);
-    c += textureLod(src, uv + vec2(o.x, o.y), 0.0) * 2.0;
-    c += textureLod(src, uv + vec2(2.0 * o.x, 0.0), 0.0);
-    c += textureLod(src, uv + vec2(o.x, -o.y), 0.0) * 2.0;
-    c += textureLod(src, uv + vec2(0.0, -2.0 * o.y), 0.0);
-    c += textureLod(src, uv + vec2(-o.x, -o.y), 0.0) * 2.0;
-    imageStore(dst, dstPixel, c * ((1.0 / 12.0) * p.intensity));
+    vec3 c = textureLod(src, uv, 0.0).rgb;
+    if (p.offset != 0.0) {
+        const vec2 o = p.offset / p.resolution;
+        c += textureLod(src, uv + STEP_0 * o, 0.0).rgb;
+        c += textureLod(src, uv + STEP_1 * o, 0.0).rgb;
+        c += textureLod(src, uv + STEP_2 * o, 0.0).rgb;
+        c += textureLod(src, uv + STEP_3 * o, 0.0).rgb;
+        c += textureLod(src, uv + STEP_4 * o, 0.0).rgb;
+        c += textureLod(src, uv + STEP_5 * o, 0.0).rgb;
+        c += textureLod(src, uv + STEP_6 * o, 0.0).rgb;
+        c *= 0.125;
+    }
+    // V2: half4(c * in_weightedCrossFade, in_crossFade) then kSrc or kSrcOver.
+    const vec4 srcColor = vec4(c * p.alpha, p.alpha);
+    const vec4 dstColor = textureLod(mixSrc, uv, 0.0);
+    imageStore(dst, dstPixel, srcColor + dstColor * (1.0 - srcColor.a));
 }
