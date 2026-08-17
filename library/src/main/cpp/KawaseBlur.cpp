@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 
 static const uint32_t kDownSpv[] =
@@ -63,6 +64,11 @@ void checkRadiusMap() {
         }                                                                  \
     } while (0)
 
+constexpr uint32_t kTsStart = 0;
+constexpr uint32_t kTsAfterDown = 1;
+constexpr uint32_t kTsEnd = 2;
+constexpr uint32_t kTsCount = 3;
+
 }  // namespace
 
 void KawaseBlur::destroyPyramid() {
@@ -82,11 +88,13 @@ void KawaseBlur::destroyPyramid() {
 void KawaseBlur::destroy() {
     if (device_ == VK_NULL_HANDLE) return;
     destroyPyramid();
+    if (queryPool_ != VK_NULL_HANDLE) vkDestroyQueryPool(device_, queryPool_, nullptr);
     if (upPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, upPipeline_, nullptr);
     if (downPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, downPipeline_, nullptr);
     if (pipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
     if (setLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device_, setLayout_, nullptr);
     if (sampler_ != VK_NULL_HANDLE) vkDestroySampler(device_, sampler_, nullptr);
+    queryPool_ = VK_NULL_HANDLE;
     upPipeline_ = VK_NULL_HANDLE;
     downPipeline_ = VK_NULL_HANDLE;
     pipelineLayout_ = VK_NULL_HANDLE;
@@ -97,6 +105,8 @@ void KawaseBlur::destroy() {
     device_ = VK_NULL_HANDLE;
     srcW_ = srcH_ = 0;
     radius_ = 0.0f;
+    timestampPeriodNs_ = 0.0f;
+    lastDownMs_ = lastUpMs_ = lastTotalMs_ = -1.0f;
 }
 
 bool KawaseBlur::createComputePipeline(const uint32_t* spv, size_t bytes, VkPipeline* out,
@@ -208,6 +218,40 @@ bool KawaseBlur::ensurePipelines(std::string* error) {
     return true;
 }
 
+bool KawaseBlur::ensureQueryPool(std::string* error) {
+    if (queryPool_ != VK_NULL_HANDLE) return true;
+
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(physical_, &props);
+    if (props.limits.timestampComputeAndGraphics != VK_TRUE || props.limits.timestampPeriod <= 0.0f) {
+        LOGI("GPU timestamps unavailable (compute+graphics / period)");
+        return true;
+    }
+
+    uint32_t familyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physical_, &familyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> families(familyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(physical_, &familyCount, families.data());
+    if (queueFamily_ >= familyCount || families[queueFamily_].timestampValidBits == 0) {
+        LOGI("GPU timestamps unavailable (queue timestampValidBits=0)");
+        return true;
+    }
+
+    VkQueryPoolCreateInfo qi{};
+    qi.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    qi.queryCount = kTsCount;
+    KB_TRY(vkCreateQueryPool(device_, &qi, nullptr, &queryPool_));
+    timestampPeriodNs_ = props.limits.timestampPeriod;
+    LOGI("GPU timestamps enabled period=%.3fns", timestampPeriodNs_);
+    return true;
+}
+
+void KawaseBlur::writeTimestamp(VkCommandBuffer cmd, uint32_t query) {
+    if (queryPool_ == VK_NULL_HANDLE) return;
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool_, query);
+}
+
 bool KawaseBlur::rebuildPyramid(const VulkanImage& src, uint32_t passes, std::string* error) {
     destroyPyramid();
     srcW_ = src.width;
@@ -279,16 +323,19 @@ bool KawaseBlur::rebuildPyramid(const VulkanImage& src, uint32_t passes, std::st
 }
 
 bool KawaseBlur::create(VkDevice device, VkPhysicalDevice physical, const VulkanImage& src,
-                        float radius, PFN_vkCmdPipelineBarrier2 cmdBarrier2, std::string* error) {
+                        float radius, uint32_t queueFamily, PFN_vkCmdPipelineBarrier2 cmdBarrier2,
+                        std::string* error) {
     destroy();
     checkRadiusMap();
     device_ = device;
     physical_ = physical;
+    queueFamily_ = queueFamily;
     cmdBarrier2_ = cmdBarrier2;
     radius_ = radius;
     const KawaseMapped mapped = mapRadius(radius, std::min(src.width, src.height));
     offset_ = mapped.offset;
     if (!ensurePipelines(error)) return false;
+    if (!ensureQueryPool(error)) return false;
     return rebuildPyramid(src, mapped.passes, error);
 }
 
@@ -323,6 +370,11 @@ bool KawaseBlur::execute(VkCommandBuffer cmd, VkQueue queue, std::string* error)
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     KB_TRY(vkBeginCommandBuffer(cmd, &begin));
 
+    if (queryPool_ != VK_NULL_HANDLE) {
+        vkCmdResetQueryPool(cmd, queryPool_, 0, kTsCount);
+        writeTimestamp(cmd, kTsStart);
+    }
+
     const uint32_t passes = static_cast<uint32_t>(downImages_.size());
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, downPipeline_);
     for (uint32_t i = 0; i < passes; ++i) {
@@ -354,6 +406,7 @@ bool KawaseBlur::execute(VkCommandBuffer cmd, VkQueue queue, std::string* error)
                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         LOGI("kawase down[%u] %ux%u -> %ux%u", i, srcW, srcH, dst.width, dst.height);
     }
+    writeTimestamp(cmd, kTsAfterDown);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, upPipeline_);
     for (uint32_t i = 0; i < passes; ++i) {
@@ -392,6 +445,7 @@ bool KawaseBlur::execute(VkCommandBuffer cmd, VkQueue queue, std::string* error)
         }
         LOGI("kawase up[%u] %ux%u -> %ux%u", i, src.width, src.height, dst.width, dst.height);
     }
+    writeTimestamp(cmd, kTsEnd);
 
     KB_TRY(vkEndCommandBuffer(cmd));
     VkSubmitInfo submit{};
@@ -401,6 +455,26 @@ bool KawaseBlur::execute(VkCommandBuffer cmd, VkQueue queue, std::string* error)
     KB_TRY(vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE));
     KB_TRY(vkQueueWaitIdle(queue));
     vkResetCommandBuffer(cmd, 0);
+
+    lastDownMs_ = lastUpMs_ = lastTotalMs_ = -1.0f;
+    if (queryPool_ != VK_NULL_HANDLE) {
+        uint64_t stamps[kTsCount]{};
+        VkResult qr = vkGetQueryPoolResults(device_, queryPool_, 0, kTsCount, sizeof(stamps), stamps,
+                                            sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+        if (qr == VK_SUCCESS) {
+            const double nsPerTick = static_cast<double>(timestampPeriodNs_);
+            const double downNs = static_cast<double>(stamps[kTsAfterDown] - stamps[kTsStart]) * nsPerTick;
+            const double upNs = static_cast<double>(stamps[kTsEnd] - stamps[kTsAfterDown]) * nsPerTick;
+            const double totalNs = static_cast<double>(stamps[kTsEnd] - stamps[kTsStart]) * nsPerTick;
+            lastDownMs_ = static_cast<float>(downNs / 1.0e6);
+            lastUpMs_ = static_cast<float>(upNs / 1.0e6);
+            lastTotalMs_ = static_cast<float>(totalNs / 1.0e6);
+            LOGI("VulkanBlur: resolution=%ux%u levels=%u downsample=%.3fms upsample=%.3fms total=%.3fms",
+                 srcW_, srcH_, passes, lastDownMs_, lastUpMs_, lastTotalMs_);
+        } else {
+            LOGI("vkGetQueryPoolResults -> %d (timestamps not ready)", static_cast<int>(qr));
+        }
+    }
     return true;
 }
 

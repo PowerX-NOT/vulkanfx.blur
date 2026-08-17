@@ -4,6 +4,7 @@
 #include <android/log.h>
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -476,7 +477,7 @@ bool VulkanContext::ensureWorkingResources() {
         if (!createTestTexture(work.width, work.height)) return false;
         if (!uploadTestTexture()) return false;
         if (blur_.passes() == 0) {
-            if (!blur_.create(device_, physical_, testImage_, radius_, cmdBarrier2_, &error_)) {
+            if (!blur_.create(device_, physical_, testImage_, radius_, queueFamily_, cmdBarrier2_, &error_)) {
                 return false;
             }
         } else if (!blur_.resize(testImage_, &error_)) {
@@ -484,7 +485,7 @@ bool VulkanContext::ensureWorkingResources() {
         }
         if (!blur_.execute(cmd_, queue_, &error_)) return false;
     } else if (blur_.passes() == 0) {
-        if (!blur_.create(device_, physical_, testImage_, radius_, cmdBarrier2_, &error_)) {
+        if (!blur_.create(device_, physical_, testImage_, radius_, queueFamily_, cmdBarrier2_, &error_)) {
             return false;
         }
         if (!blur_.execute(cmd_, queue_, &error_)) return false;
@@ -822,11 +823,9 @@ bool VulkanContext::setRadius(float radius) {
 std::string VulkanContext::info() const {
     const int w = window_ ? ANativeWindow_getWidth(window_) : 0;
     const int h = window_ ? ANativeWindow_getHeight(window_) : 0;
-    const bool timestamps = props_.limits.timestampComputeAndGraphics == VK_TRUE &&
-                            props_.limits.timestampPeriod > 0.0f;
     std::string s;
-    s += "VulkanBlur Phase 9\n";
-    s += "status=resize\n";
+    s += "VulkanBlur Phase 10\n";
+    s += "status=timestamps\n";
     s += "device=";
     s += props_.deviceName;
     s += "\n";
@@ -850,8 +849,18 @@ std::string VulkanContext::info() const {
     s += sync2_ ? "yes" : "no";
     s += "\n";
     s += "timestamps=";
-    s += timestamps ? "yes" : "no";
+    s += blur_.timestampsEnabled() ? "yes" : "no";
     s += "\n";
+    if (blur_.totalMs() >= 0.0f) {
+        char timing[128];
+        const float downMs = blur_.downMs();
+        const float upMs = blur_.upMs();
+        const float totalMs = blur_.totalMs();
+        std::snprintf(timing, sizeof(timing),
+                      "downsample=%.3fms\nupsample=%.3fms\ntotal=%.3fms\n",
+                      downMs, upMs, totalMs);
+        s += timing;
+    }
     s += "validation=";
     s += validation_ ? "yes" : "no";
     s += "\n";
