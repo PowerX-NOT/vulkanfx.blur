@@ -7,6 +7,8 @@ layout(binding = 1, rgba8) writeonly uniform image2D dst;
 
 // kind 0: 4x downsample, 4 diamond taps at ±0.25 dest px (RenderEngine V2 quarter)
 // kind 1: 2x downsample, center*4 + 4 taps at ±0.5 dest px (V2 half)
+layout(constant_id = 0) const int KIND = 0;
+
 layout(push_constant) uniform Params {
     vec2 resolution;
     float offset;
@@ -21,7 +23,7 @@ void main() {
     }
 
     const vec2 uv = (vec2(dstPixel) + 0.5) / p.resolution;
-    if (p.kind == 0) {
+    if (KIND == 0) {
         const vec2 o = vec2(0.25) / p.resolution;
         vec3 c = textureLod(src, uv + vec2(o.x, o.y), 0.0).rgb;
         c += textureLod(src, uv + vec2(o.x, -o.y), 0.0).rgb;

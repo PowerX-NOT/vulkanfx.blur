@@ -469,6 +469,7 @@ void VulkanContext::barrierImage(VkCommandBuffer cmd, VkImage image,
 }
 
 bool VulkanContext::createInputImage(uint32_t w, uint32_t h) {
+    inputLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     return inputImage_.create(
             device_, physical_, w, h, VK_FORMAT_R8G8B8A8_UNORM,
             VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &error_);
@@ -482,7 +483,7 @@ bool VulkanContext::rebuildBlurFromInput() {
     } else if (!blur_.resize(inputImage_, &error_)) {
         return false;
     }
-    return blur_.execute(cmd_, queue_, &error_);
+    return true;
 }
 
 bool VulkanContext::ensureWorkingResources() {
@@ -524,7 +525,7 @@ bool VulkanContext::uploadInputRgba(const uint8_t* rgba) {
     VK_TRY(vkBeginCommandBuffer(cmd_, &begin));
 
     barrierImage(cmd_, inputImage_.image,
-                 VK_PIPELINE_STAGE_2_NONE, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_PIPELINE_STAGE_2_NONE, 0, inputLayout_,
                  VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
     VkBufferImageCopy region{};
@@ -537,6 +538,8 @@ bool VulkanContext::uploadInputRgba(const uint8_t* rgba) {
                  VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    inputLayout_ = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VK_TRY(vkEndCommandBuffer(cmd_));
     VK_TRY(vkResetFences(device_, 1, &fence_));
@@ -585,12 +588,11 @@ bool VulkanContext::setInputRgba(const uint8_t* rgba, uint32_t width, uint32_t h
         error_ = "setInputRgba: max edge " + std::to_string(kMaxWorkEdge);
         return false;
     }
-    vkDeviceWaitIdle(device_);
+    vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX);
     useChecker_ = false;
     if (!createInputImage(width, height)) return false;
     if (!uploadInputRgba(rgba)) return false;
-    if (!rebuildBlurFromInput()) return false;
-    return presentTest();
+    return rebuildBlurFromInput();
 }
 
 bool VulkanContext::createSwapchain() {
@@ -710,7 +712,10 @@ void VulkanContext::destroySwapchain() {
 
 bool VulkanContext::presentTest() {
     if (swapchain_ == VK_NULL_HANDLE || swapchainImages_.empty()) return true;
-    if (blur_.passes() > 0 && !blur_.preparePresent(cmd_, queue_, &error_)) return false;
+
+    // Wait for the previous frame's GPU work, then read timestamps (pipelined frame loop).
+    VK_TRY(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX));
+    blur_.collectTimestamps();
 
     for (int attempt = 0; attempt < 2; ++attempt) {
         uint32_t index = 0;
@@ -733,6 +738,7 @@ bool VulkanContext::presentTest() {
         begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         VK_TRY(vkBeginCommandBuffer(cmd_, &begin));
+        if (blur_.passes() > 0 && !blur_.record(cmd_, &error_)) return false;
 
         // Acquired swapchain image: contents discarded. Make it a blit destination.
         // Acquire semaphore (submit wait) covers GPU availability. Layout is UNDEFINED until we transition.
@@ -762,7 +768,8 @@ bool VulkanContext::presentTest() {
         VK_TRY(vkEndCommandBuffer(cmd_));
 
         VK_TRY(vkResetFences(device_, 1, &fence_));
-        VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        VkPipelineStageFlags waitStage =
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
         VkSubmitInfo submit{};
         submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submit.waitSemaphoreCount = 1;
@@ -794,8 +801,6 @@ bool VulkanContext::presentTest() {
             LOGE("%s", error_.c_str());
             return false;
         }
-        // Wait for the blit fence only — not the whole queue (frame-loop ready).
-        VK_TRY(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX));
         return true;
     }
     return true;
@@ -848,15 +853,12 @@ bool VulkanContext::setRadius(float radius) {
     if (inputImage_.image == VK_NULL_HANDLE) {
         return true;  // applied on next ensureWorkingResources / surface
     }
-    vkDeviceWaitIdle(device_);
-    if (!blur_.setRadius(radius, inputImage_, &error_)) return false;
-    if (!blur_.execute(cmd_, queue_, &error_)) return false;
-    return presentTest();
+    return blur_.setRadius(radius, inputImage_, &error_);
 }
 
 bool VulkanContext::setDebugLevel(int level) {
     blur_.setDebugLevel(level);
-    return presentTest();
+    return true;
 }
 
 bool VulkanContext::render() {
@@ -864,8 +866,6 @@ bool VulkanContext::render() {
         error_ = "render before working resources";
         return false;
     }
-    vkDeviceWaitIdle(device_);
-    if (!blur_.execute(cmd_, queue_, &error_)) return false;
     return presentTest();
 }
 
@@ -873,8 +873,8 @@ std::string VulkanContext::info() const {
     const int w = window_ ? ANativeWindow_getWidth(window_) : 0;
     const int h = window_ ? ANativeWindow_getHeight(window_) : 0;
     std::string s;
-    s += "VulkanBlur Phase 13\n";
-    s += "status=fence\n";
+    s += "VulkanBlur kawase2\n";
+    s += "status=pipelined\n";
     s += "device=";
     s += props_.deviceName;
     s += "\n";

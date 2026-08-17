@@ -110,18 +110,18 @@ void KawaseBlur::destroy() {
     if (device_ == VK_NULL_HANDLE) return;
     destroyPyramid();
     if (queryPool_ != VK_NULL_HANDLE) vkDestroyQueryPool(device_, queryPool_, nullptr);
-    if (fence_ != VK_NULL_HANDLE) vkDestroyFence(device_, fence_, nullptr);
     if (drawPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, drawPipeline_, nullptr);
     if (upPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, upPipeline_, nullptr);
+    if (downHalfPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, downHalfPipeline_, nullptr);
     if (downPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, downPipeline_, nullptr);
     if (pipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
     if (setLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device_, setLayout_, nullptr);
     if (samplerMirror_ != VK_NULL_HANDLE) vkDestroySampler(device_, samplerMirror_, nullptr);
     if (sampler_ != VK_NULL_HANDLE) vkDestroySampler(device_, sampler_, nullptr);
     queryPool_ = VK_NULL_HANDLE;
-    fence_ = VK_NULL_HANDLE;
     drawPipeline_ = VK_NULL_HANDLE;
     upPipeline_ = VK_NULL_HANDLE;
+    downHalfPipeline_ = VK_NULL_HANDLE;
     downPipeline_ = VK_NULL_HANDLE;
     pipelineLayout_ = VK_NULL_HANDLE;
     setLayout_ = VK_NULL_HANDLE;
@@ -133,24 +133,34 @@ void KawaseBlur::destroy() {
     srcW_ = srcH_ = 0;
     radius_ = 0.0f;
     debugLevel_ = 0;
-    preparedDebugLevel_ = -1;
+    pyramidReady_ = false;
     timestampPeriodNs_ = 0.0f;
     lastDownMs_ = lastUpMs_ = lastTotalMs_ = -1.0f;
 }
 
 bool KawaseBlur::createComputePipeline(const uint32_t* spv, size_t bytes, VkPipeline* out,
-                                       std::string* error) {
+                                       std::string* error, const int32_t* specKind) {
     VkShaderModuleCreateInfo sm{};
     sm.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
     sm.codeSize = bytes;
     sm.pCode = spv;
     VkShaderModule module = VK_NULL_HANDLE;
     KB_TRY(vkCreateShaderModule(device_, &sm, nullptr, &module));
+    VkSpecializationMapEntry specEntry{};
+    specEntry.constantID = 0;
+    specEntry.offset = 0;
+    specEntry.size = sizeof(int32_t);
+    VkSpecializationInfo specInfo{};
+    specInfo.mapEntryCount = 1;
+    specInfo.pMapEntries = &specEntry;
+    specInfo.dataSize = sizeof(int32_t);
+    specInfo.pData = specKind;
     VkPipelineShaderStageCreateInfo stage{};
     stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     stage.module = module;
     stage.pName = "main";
+    if (specKind) stage.pSpecializationInfo = &specInfo;
     VkComputePipelineCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
     ci.stage = stage;
@@ -199,7 +209,7 @@ void KawaseBlur::writeSet(VkDescriptorSet set, VkImageView src, VkImageView dst,
 }
 
 bool KawaseBlur::ensurePipelines(std::string* error) {
-    if (downPipeline_ != VK_NULL_HANDLE) return true;
+    if (downPipeline_ != VK_NULL_HANDLE && downHalfPipeline_ != VK_NULL_HANDLE) return true;
 
     VkFormatProperties fmt{};
     vkGetPhysicalDeviceFormatProperties(physical_, VK_FORMAT_R8G8B8A8_UNORM, &fmt);
@@ -258,7 +268,14 @@ bool KawaseBlur::ensurePipelines(std::string* error) {
     pl.pPushConstantRanges = &pc;
     KB_TRY(vkCreatePipelineLayout(device_, &pl, nullptr, &pipelineLayout_));
 
-    if (!createComputePipeline(kDownSpv, sizeof(kDownSpv), &downPipeline_, error)) return false;
+    const int32_t kindQuarter = 0;
+    const int32_t kindHalf = 1;
+    if (!createComputePipeline(kDownSpv, sizeof(kDownSpv), &downPipeline_, error, &kindQuarter)) {
+        return false;
+    }
+    if (!createComputePipeline(kDownSpv, sizeof(kDownSpv), &downHalfPipeline_, error, &kindHalf)) {
+        return false;
+    }
     if (!createComputePipeline(kUpSpv, sizeof(kUpSpv), &upPipeline_, error)) return false;
     if (!createComputePipeline(kDrawSpv, sizeof(kDrawSpv), &drawPipeline_, error)) return false;
     return true;
@@ -293,27 +310,6 @@ bool KawaseBlur::ensureQueryPool(std::string* error) {
     return true;
 }
 
-bool KawaseBlur::ensureFence(std::string* error) {
-    if (fence_ != VK_NULL_HANDLE) return true;
-    VkFenceCreateInfo fi{};
-    fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    KB_TRY(vkCreateFence(device_, &fi, nullptr, &fence_));
-    return true;
-}
-
-bool KawaseBlur::submitAndWait(VkCommandBuffer cmd, VkQueue queue, std::string* error) {
-    KB_TRY(vkResetFences(device_, 1, &fence_));
-    VkSubmitInfo submit{};
-    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &cmd;
-    KB_TRY(vkQueueSubmit(queue, 1, &submit, fence_));
-    KB_TRY(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX));
-    vkResetCommandBuffer(cmd, 0);
-    return true;
-}
-
 void KawaseBlur::writeTimestamp(VkCommandBuffer cmd, uint32_t query) {
     if (queryPool_ == VK_NULL_HANDLE) return;
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool_, query);
@@ -345,11 +341,14 @@ bool KawaseBlur::rebuildPyramid(const VulkanImage& src, uint32_t extraPasses, st
             return false;
         }
     }
-    if (!drawImage_.create(device_, physical_, srcW_, srcH_, VK_FORMAT_R8G8B8A8_UNORM, usage, error)) {
-        return false;
+    const bool needDraw = radius_ < kMaxCrossFadeRadius;
+    if (needDraw) {
+        if (!drawImage_.create(device_, physical_, srcW_, srcH_, VK_FORMAT_R8G8B8A8_UNORM, usage, error)) {
+            return false;
+        }
     }
 
-    const uint32_t nSets = nDown + extraPasses + 1;
+    const uint32_t nSets = nDown + extraPasses + (needDraw ? 1u : 0u);
     VkDescriptorPoolSize poolSizes[2]{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     poolSizes[0].descriptorCount = nSets * 2;
@@ -379,10 +378,12 @@ bool KawaseBlur::rebuildPyramid(const VulkanImage& src, uint32_t extraPasses, st
     };
     if (!allocSets(nDown, &downSets_)) return false;
     if (!allocSets(extraPasses, &upSets_)) return false;
-    {
+    if (needDraw) {
         std::vector<VkDescriptorSet> drawSets;
         if (!allocSets(1, &drawSets)) return false;
         drawSet_ = drawSets[0];
+    } else {
+        drawSet_ = VK_NULL_HANDLE;
     }
 
     for (uint32_t i = 0; i < nDown; ++i) {
@@ -395,7 +396,10 @@ bool KawaseBlur::rebuildPyramid(const VulkanImage& src, uint32_t extraPasses, st
         writeSet(upSets_[i], in.view, upImages_[i].view, mix.view, sampler_);
     }
     const VulkanImage& blurOut = extraPasses > 0 ? upImages_.back() : downImages_.front();
-    writeSet(drawSet_, blurOut.view, drawImage_.view, src.view, samplerMirror_);
+    if (needDraw) {
+        writeSet(drawSet_, blurOut.view, drawImage_.view, src.view, samplerMirror_);
+    }
+    pyramidReady_ = false;
     LOGI("kawase2 rebuild %ux%u extra=%u step=%.2f depth=%.2f", srcW_, srcH_, extraPasses, step_,
          filterDepth_);
     return true;
@@ -416,7 +420,6 @@ bool KawaseBlur::create(VkDevice device, VkPhysicalDevice physical, const Vulkan
     filterDepth_ = mapped.depth;
     if (!ensurePipelines(error)) return false;
     if (!ensureQueryPool(error)) return false;
-    if (!ensureFence(error)) return false;
     return rebuildPyramid(src, mapped.extraPasses, error);
 }
 
@@ -425,12 +428,15 @@ bool KawaseBlur::setRadius(float radius, const VulkanImage& src, std::string* er
         if (error) *error = "KawaseBlur::setRadius before create";
         return false;
     }
+    const bool hadDraw = radius_ < kMaxCrossFadeRadius;
     const KawaseMapped mapped = mapRadius(radius);
+    const bool needDraw = radius < kMaxCrossFadeRadius;
     radius_ = radius;
     step_ = mapped.step;
     filterDepth_ = mapped.depth;
     if (mapped.extraPasses + 1 == downImages_.size() && src.width == srcW_ && src.height == srcH_) {
-        return true;
+        if (hadDraw == needDraw) return true;
+        return rebuildPyramid(src, mapped.extraPasses, error);
     }
     return rebuildPyramid(src, mapped.extraPasses, error);
 }
@@ -447,60 +453,49 @@ bool KawaseBlur::resize(const VulkanImage& src, std::string* error) {
     return rebuildPyramid(src, mapped.extraPasses, error);
 }
 
-bool KawaseBlur::execute(VkCommandBuffer cmd, VkQueue queue, std::string* error) {
-    VkCommandBufferBeginInfo begin{};
-    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    KB_TRY(vkBeginCommandBuffer(cmd, &begin));
-
+bool KawaseBlur::record(VkCommandBuffer cmd, std::string* error) {
+    (void)error;
     if (queryPool_ != VK_NULL_HANDLE) {
         vkCmdResetQueryPool(cmd, queryPool_, 0, kTsCount);
         writeTimestamp(cmd, kTsStart);
     }
 
-    const uint32_t nDown = static_cast<uint32_t>(downImages_.size());
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, downPipeline_);
-    for (uint32_t i = 0; i < nDown; ++i) {
-        const uint32_t srcW = (i == 0) ? srcW_ : downImages_[i - 1].width;
-        const uint32_t srcH = (i == 0) ? srcH_ : downImages_[i - 1].height;
-        VulkanImage& dst = downImages_[i];
+    const VkImageLayout wrOld =
+            pyramidReady_ ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
 
+    const uint32_t nDown = static_cast<uint32_t>(downImages_.size());
+    for (uint32_t i = 0; i < nDown; ++i) {
+        VulkanImage& dst = downImages_[i];
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, i == 0 ? downPipeline_ : downHalfPipeline_);
         imageBarrier(cmd, cmdBarrier2_, dst.image,
-                     VK_PIPELINE_STAGE_2_NONE, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+                     VK_PIPELINE_STAGE_2_NONE, 0, wrOld,
                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                      VK_IMAGE_LAYOUT_GENERAL);
-
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_, 0, 1,
                                 &downSets_[i], 0, nullptr);
         KawasePush push{};
         push.resX = static_cast<float>(dst.width);
         push.resY = static_cast<float>(dst.height);
-        push.kind = (i == 0) ? 0 : 1;
         vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
         vkCmdDispatch(cmd, (dst.width + 15u) / 16u, (dst.height + 15u) / 16u, 1);
-
         imageBarrier(cmd, cmdBarrier2_, dst.image,
                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                      VK_IMAGE_LAYOUT_GENERAL,
                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        LOGI("kawase2 down[%u] kind=%d %ux%u -> %ux%u", i, push.kind, srcW, srcH, dst.width, dst.height);
     }
     writeTimestamp(cmd, kTsAfterDown);
 
     const uint32_t extra = static_cast<uint32_t>(upImages_.size());
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, upPipeline_);
     for (uint32_t i = 0; i < extra; ++i) {
-        const VulkanImage& src = (i == 0) ? downImages_.back() : upImages_[i - 1];
         VulkanImage& dst = upImages_[i];
         const uint32_t v2Index = extra - 1 - i;
         const float alpha = std::min(1.0f, filterDepth_ - static_cast<float>(v2Index));
-
         imageBarrier(cmd, cmdBarrier2_, dst.image,
-                     VK_PIPELINE_STAGE_2_NONE, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+                     VK_PIPELINE_STAGE_2_NONE, 0, wrOld,
                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                      VK_IMAGE_LAYOUT_GENERAL);
-
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_, 0, 1,
                                 &upSets_[i], 0, nullptr);
         KawasePush push{};
@@ -510,70 +505,70 @@ bool KawaseBlur::execute(VkCommandBuffer cmd, VkQueue queue, std::string* error)
         push.alpha = alpha;
         vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
         vkCmdDispatch(cmd, (dst.width + 15u) / 16u, (dst.height + 15u) / 16u, 1);
-
         imageBarrier(cmd, cmdBarrier2_, dst.image,
                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                      VK_IMAGE_LAYOUT_GENERAL,
                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        LOGI("kawase2 up[%u] %ux%u -> %ux%u alpha=%.2f", i, src.width, src.height, dst.width, dst.height,
-             alpha);
     }
 
-    // BlurFilter::drawBlurRegion: 4x linear+mirror upsample, mix original if radius < 10.
-    imageBarrier(cmd, cmdBarrier2_, drawImage_.image,
-                 VK_PIPELINE_STAGE_2_NONE, 0, VK_IMAGE_LAYOUT_UNDEFINED,
-                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                 VK_IMAGE_LAYOUT_GENERAL);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, drawPipeline_);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_, 0, 1, &drawSet_, 0,
-                            nullptr);
-    KawasePush drawPush{};
-    drawPush.resX = static_cast<float>(drawImage_.width);
-    drawPush.resY = static_cast<float>(drawImage_.height);
-    drawPush.alpha = std::min(1.0f, radius_ / kMaxCrossFadeRadius);
-    vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(drawPush),
-                       &drawPush);
-    vkCmdDispatch(cmd, (drawImage_.width + 15u) / 16u, (drawImage_.height + 15u) / 16u, 1);
-    imageBarrier(cmd, cmdBarrier2_, drawImage_.image,
-                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                 VK_IMAGE_LAYOUT_GENERAL,
-                 VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
-                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-
+    const bool mixOriginal =
+            debugLevel_ <= 0 && radius_ < kMaxCrossFadeRadius && drawImage_.image != VK_NULL_HANDLE;
+    if (mixOriginal) {
+        const VkImageLayout drawOld =
+                pyramidReady_ ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+        imageBarrier(cmd, cmdBarrier2_, drawImage_.image,
+                     VK_PIPELINE_STAGE_2_NONE, 0, drawOld,
+                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_GENERAL);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, drawPipeline_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_, 0, 1, &drawSet_,
+                                0, nullptr);
+        KawasePush drawPush{};
+        drawPush.resX = static_cast<float>(drawImage_.width);
+        drawPush.resY = static_cast<float>(drawImage_.height);
+        drawPush.alpha = std::min(1.0f, radius_ / kMaxCrossFadeRadius);
+        vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(drawPush),
+                           &drawPush);
+        vkCmdDispatch(cmd, (drawImage_.width + 15u) / 16u, (drawImage_.height + 15u) / 16u, 1);
+        imageBarrier(cmd, cmdBarrier2_, drawImage_.image,
+                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_GENERAL,
+                     VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    } else {
+        const VulkanImage& out = presentImage();
+        imageBarrier(cmd, cmdBarrier2_, out.image,
+                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    }
     writeTimestamp(cmd, kTsEnd);
-
-    KB_TRY(vkEndCommandBuffer(cmd));
-    if (!submitAndWait(cmd, queue, error)) return false;
-    preparedDebugLevel_ = -1;
-
-    lastDownMs_ = lastUpMs_ = lastTotalMs_ = -1.0f;
-    if (queryPool_ != VK_NULL_HANDLE) {
-        uint64_t stamps[kTsCount]{};
-        VkResult qr = vkGetQueryPoolResults(device_, queryPool_, 0, kTsCount, sizeof(stamps), stamps,
-                                            sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
-        if (qr == VK_SUCCESS) {
-            const double nsPerTick = static_cast<double>(timestampPeriodNs_);
-            const double downNs = static_cast<double>(stamps[kTsAfterDown] - stamps[kTsStart]) * nsPerTick;
-            const double upNs = static_cast<double>(stamps[kTsEnd] - stamps[kTsAfterDown]) * nsPerTick;
-            const double totalNs = static_cast<double>(stamps[kTsEnd] - stamps[kTsStart]) * nsPerTick;
-            lastDownMs_ = static_cast<float>(downNs / 1.0e6);
-            lastUpMs_ = static_cast<float>(upNs / 1.0e6);
-            lastTotalMs_ = static_cast<float>(totalNs / 1.0e6);
-            LOGI("VulkanBlur: resolution=%ux%u levels=%u downsample=%.3fms upsample=%.3fms total=%.3fms",
-                 srcW_, srcH_, nDown, lastDownMs_, lastUpMs_, lastTotalMs_);
-        } else {
-            LOGI("vkGetQueryPoolResults -> %d (timestamps not ready)", static_cast<int>(qr));
-        }
-    }
+    pyramidReady_ = true;
     return true;
+}
+
+void KawaseBlur::collectTimestamps() {
+    lastDownMs_ = lastUpMs_ = lastTotalMs_ = -1.0f;
+    if (queryPool_ == VK_NULL_HANDLE) return;
+    uint64_t stamps[kTsCount]{};
+    VkResult qr = vkGetQueryPoolResults(device_, queryPool_, 0, kTsCount, sizeof(stamps), stamps,
+                                        sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+    if (qr != VK_SUCCESS) return;
+    const double nsPerTick = static_cast<double>(timestampPeriodNs_);
+    lastDownMs_ = static_cast<float>(
+            static_cast<double>(stamps[kTsAfterDown] - stamps[kTsStart]) * nsPerTick / 1.0e6);
+    lastUpMs_ = static_cast<float>(
+            static_cast<double>(stamps[kTsEnd] - stamps[kTsAfterDown]) * nsPerTick / 1.0e6);
+    lastTotalMs_ = static_cast<float>(
+            static_cast<double>(stamps[kTsEnd] - stamps[kTsStart]) * nsPerTick / 1.0e6);
 }
 
 void KawaseBlur::setDebugLevel(int level) {
     if (level < 0) level = 0;
     const int maxLevel = static_cast<int>(downImages_.size());
     if (maxLevel > 0 && level > maxLevel) level = maxLevel;
-    if (level != debugLevel_) preparedDebugLevel_ = -1;
     debugLevel_ = level;
 }
 
@@ -583,35 +578,9 @@ const VulkanImage& KawaseBlur::presentImage() const {
         if (i >= downImages_.size()) i = downImages_.size() - 1;
         return downImages_[i];
     }
-    return drawImage_;
-}
-
-bool KawaseBlur::preparePresent(VkCommandBuffer cmd, VkQueue queue, std::string* error) {
-    if (downImages_.empty()) {
-        if (error) *error = "KawaseBlur::preparePresent before execute";
-        return false;
-    }
-    if (debugLevel_ <= 0) {
-        preparedDebugLevel_ = 0;
-        return true;  // drawImage_ already TRANSFER_SRC after execute
-    }
-    if (preparedDebugLevel_ == debugLevel_) return true;
-
-    const VulkanImage& img = presentImage();
-    VkCommandBufferBeginInfo begin{};
-    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    KB_TRY(vkBeginCommandBuffer(cmd, &begin));
-    imageBarrier(cmd, cmdBarrier2_, img.image,
-                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                 VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
-                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    KB_TRY(vkEndCommandBuffer(cmd));
-    if (!submitAndWait(cmd, queue, error)) return false;
-    preparedDebugLevel_ = debugLevel_;
-    LOGI("debug present level=%d %ux%u", debugLevel_, img.width, img.height);
-    return true;
+    if (radius_ < kMaxCrossFadeRadius && drawImage_.image != VK_NULL_HANDLE) return drawImage_;
+    if (!upImages_.empty()) return upImages_.back();
+    return downImages_.front();
 }
 
 std::string KawaseBlur::pyramidInfo() const {
@@ -628,9 +597,11 @@ std::string KawaseBlur::pyramidInfo() const {
         s += "x";
         s += std::to_string(img.height);
     }
-    s += " => ";
-    s += std::to_string(drawImage_.width);
-    s += "x";
-    s += std::to_string(drawImage_.height);
+    if (drawImage_.image != VK_NULL_HANDLE) {
+        s += " => ";
+        s += std::to_string(drawImage_.width);
+        s += "x";
+        s += std::to_string(drawImage_.height);
+    }
     return s;
 }

@@ -82,4 +82,5 @@ private:
     VkQueueFlags queueFlags_ = 0;
     bool validation_ = false;
     bool sync2_ = false;
+    VkImageLayout inputLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
 };
