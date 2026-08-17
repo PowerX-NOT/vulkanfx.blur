@@ -1,0 +1,43 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform sampler2D src;
+layout(binding = 1, rgba8) writeonly uniform image2D dst;
+
+// texelSize = 1 / source (smaller) resolution
+// offset    = Kawase radius in source texels
+// intensity = scale (1.0 = energy-preserving)
+// resolution = destination (larger) size in pixels
+layout(push_constant) uniform Params {
+    vec2 texelSize;
+    float offset;
+    float intensity;
+    vec2 resolution;
+} p;
+
+void main() {
+    const ivec2 dstPixel = ivec2(gl_GlobalInvocationID.xy);
+    if (dstPixel.x >= int(p.resolution.x) || dstPixel.y >= int(p.resolution.y)) {
+        return;
+    }
+
+    // Dest pixel center in shared UV space. With dest = 2*src this reconstructs
+    // the finer grid from the coarser level.
+    const vec2 uv = (vec2(dstPixel) + 0.5) / p.resolution;
+    const vec2 o = p.texelSize * p.offset;
+
+    // Dual Kawase upsample (8 taps, weights sum to 12):
+    //   4 axis samples at 2*o, weight 1
+    //   4 diagonal samples at 1*o, weight 2
+    // textureLod: compute has no derivatives.
+    vec4 c = textureLod(src, uv + vec2(-2.0 * o.x, 0.0), 0.0);
+    c += textureLod(src, uv + vec2(-o.x, o.y), 0.0) * 2.0;
+    c += textureLod(src, uv + vec2(0.0, 2.0 * o.y), 0.0);
+    c += textureLod(src, uv + vec2(o.x, o.y), 0.0) * 2.0;
+    c += textureLod(src, uv + vec2(2.0 * o.x, 0.0), 0.0);
+    c += textureLod(src, uv + vec2(o.x, -o.y), 0.0) * 2.0;
+    c += textureLod(src, uv + vec2(0.0, -2.0 * o.y), 0.0);
+    c += textureLod(src, uv + vec2(-o.x, -o.y), 0.0) * 2.0;
+    imageStore(dst, dstPixel, c * ((1.0 / 12.0) * p.intensity));
+}

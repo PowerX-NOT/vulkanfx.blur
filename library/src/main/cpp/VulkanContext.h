@@ -35,8 +35,10 @@ private:
     bool createTestTexture();
     bool uploadTestTexture();
     bool createDownPipeline();
+    bool createUpPipeline();
     void destroyDownPipeline();
     bool dispatchDown();
+    void writeKawaseSet(VkDescriptorSet set, VkImageView src, VkImageView dst);
     bool presentTest();
     void barrierImage(VkCommandBuffer cmd, VkImage image,
                       VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess, VkImageLayout oldLayout,
@@ -62,11 +64,14 @@ private:
     std::vector<VkImage> swapchainImages_;
     VulkanImage testImage_;
     std::vector<VulkanImage> downImages_;
+    std::vector<VulkanImage> upImages_;
     std::vector<VkDescriptorSet> downDescSets_;
+    std::vector<VkDescriptorSet> upDescSets_;
     VkSampler sampler_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout downSetLayout_ = VK_NULL_HANDLE;
     VkPipelineLayout downPipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline downPipeline_ = VK_NULL_HANDLE;
+    VkPipeline upPipeline_ = VK_NULL_HANDLE;
     VkDescriptorPool downDescPool_ = VK_NULL_HANDLE;
     PFN_vkCmdPipelineBarrier2 cmdBarrier2_ = nullptr;
     VkPhysicalDeviceProperties props_{};

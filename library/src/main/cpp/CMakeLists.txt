@@ -49,6 +49,7 @@ macro(embed_comp NAME)
 endmacro()
 
 embed_comp(kawase_down)
+embed_comp(kawase_up)
 set_source_files_properties(VulkanContext.cpp PROPERTIES OBJECT_DEPENDS "${_shader_incs}")
 add_custom_target(shaders DEPENDS ${_shader_incs})
 add_dependencies(vulkanblur shaders)

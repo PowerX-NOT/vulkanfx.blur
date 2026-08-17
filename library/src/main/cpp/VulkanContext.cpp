@@ -10,6 +10,9 @@
 static const uint32_t kDownSpv[] =
 #include "kawase_down_comp_spv.inc"
 ;
+static const uint32_t kUpSpv[] =
+#include "kawase_up_comp_spv.inc"
+;
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "VulkanBlur", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "VulkanBlur", __VA_ARGS__)
@@ -217,6 +220,8 @@ VulkanContext::~VulkanContext() {
         vkDeviceWaitIdle(device_);
     }
     destroyDownPipeline();
+    for (auto& img : upImages_) img.destroy();
+    upImages_.clear();
     for (auto& img : downImages_) img.destroy();
     downImages_.clear();
     testImage_.destroy();
@@ -257,6 +262,7 @@ bool VulkanContext::init(ANativeWindow* window, bool enableValidation) {
     if (!createSyncObjects()) return false;
     if (!createTestTexture()) return false;
     if (!createDownPipeline()) return false;
+    if (!createUpPipeline()) return false;
     if (!uploadTestTexture()) return false;
     if (!dispatchDown()) return false;
     if (!createSwapchain()) return false;
@@ -701,12 +707,12 @@ bool VulkanContext::createDownPipeline() {
 
     VkDescriptorPoolSize poolSizes[2]{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[0].descriptorCount = kDownPasses;
+    poolSizes[0].descriptorCount = kDownPasses * 2;
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    poolSizes[1].descriptorCount = kDownPasses;
+    poolSizes[1].descriptorCount = kDownPasses * 2;
     VkDescriptorPoolCreateInfo pool{};
     pool.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool.maxSets = kDownPasses;
+    pool.maxSets = kDownPasses * 2;
     pool.poolSizeCount = 2;
     pool.pPoolSizes = poolSizes;
     VK_TRY(vkCreateDescriptorPool(device_, &pool, nullptr, &downDescPool_));
@@ -722,42 +728,106 @@ bool VulkanContext::createDownPipeline() {
 
     for (uint32_t i = 0; i < kDownPasses; ++i) {
         const VulkanImage& src = (i == 0) ? testImage_ : downImages_[i - 1];
-        const VulkanImage& dst = downImages_[i];
-        VkDescriptorImageInfo images[2]{};
-        images[0].sampler = sampler_;
-        images[0].imageView = src.view;
-        images[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        images[1].imageView = dst.view;
-        images[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        VkWriteDescriptorSet writes[2]{};
-        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = downDescSets_[i];
-        writes[0].dstBinding = 0;
-        writes[0].descriptorCount = 1;
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[0].pImageInfo = &images[0];
-        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = downDescSets_[i];
-        writes[1].dstBinding = 1;
-        writes[1].descriptorCount = 1;
-        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writes[1].pImageInfo = &images[1];
-        vkUpdateDescriptorSets(device_, 2, writes, 0, nullptr);
+        writeKawaseSet(downDescSets_[i], src.view, downImages_[i].view);
+    }
+    return true;
+}
+
+void VulkanContext::writeKawaseSet(VkDescriptorSet set, VkImageView src, VkImageView dst) {
+    VkDescriptorImageInfo images[2]{};
+    images[0].sampler = sampler_;
+    images[0].imageView = src;
+    images[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    images[1].imageView = dst;
+    images[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkWriteDescriptorSet writes[2]{};
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = set;
+    writes[0].dstBinding = 0;
+    writes[0].descriptorCount = 1;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[0].pImageInfo = &images[0];
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = set;
+    writes[1].dstBinding = 1;
+    writes[1].descriptorCount = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[1].pImageInfo = &images[1];
+    vkUpdateDescriptorSets(device_, 2, writes, 0, nullptr);
+}
+
+bool VulkanContext::createUpPipeline() {
+    if (!upImages_.empty()) {
+        for (auto& img : upImages_) img.destroy();
+        upImages_.clear();
+    }
+    upImages_.resize(kDownPasses);
+    uint32_t w = downImages_.back().width;
+    uint32_t h = downImages_.back().height;
+    for (uint32_t i = 0; i < kDownPasses; ++i) {
+        w *= 2;
+        h *= 2;
+        if (!upImages_[i].create(device_, physical_, w, h, VK_FORMAT_R8G8B8A8_UNORM,
+                                 VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                         VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                 &error_)) {
+            return false;
+        }
+    }
+
+    VkShaderModuleCreateInfo sm{};
+    sm.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    sm.codeSize = sizeof(kUpSpv);
+    sm.pCode = kUpSpv;
+    VkShaderModule module = VK_NULL_HANDLE;
+    VK_TRY(vkCreateShaderModule(device_, &sm, nullptr, &module));
+    VkPipelineShaderStageCreateInfo stage{};
+    stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    stage.module = module;
+    stage.pName = "main";
+    VkComputePipelineCreateInfo ci{};
+    ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    ci.stage = stage;
+    ci.layout = downPipelineLayout_;
+    VkResult pipe = vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &ci, nullptr, &upPipeline_);
+    vkDestroyShaderModule(device_, module, nullptr);
+    if (pipe != VK_SUCCESS) {
+        error_ = std::string("vkCreateComputePipelines(up) -> ") + vkResultName(pipe);
+        LOGE("%s", error_.c_str());
+        return false;
+    }
+
+    std::vector<VkDescriptorSetLayout> layouts(kDownPasses, downSetLayout_);
+    VkDescriptorSetAllocateInfo alloc{};
+    alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    alloc.descriptorPool = downDescPool_;
+    alloc.descriptorSetCount = kDownPasses;
+    alloc.pSetLayouts = layouts.data();
+    upDescSets_.resize(kDownPasses);
+    VK_TRY(vkAllocateDescriptorSets(device_, &alloc, upDescSets_.data()));
+
+    for (uint32_t i = 0; i < kDownPasses; ++i) {
+        const VulkanImage& src = (i == 0) ? downImages_.back() : upImages_[i - 1];
+        writeKawaseSet(upDescSets_[i], src.view, upImages_[i].view);
     }
     return true;
 }
 
 void VulkanContext::destroyDownPipeline() {
     if (device_ == VK_NULL_HANDLE) return;
+    if (upPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, upPipeline_, nullptr);
     if (downPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, downPipeline_, nullptr);
     if (downPipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device_, downPipelineLayout_, nullptr);
     if (downDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(device_, downDescPool_, nullptr);
     if (downSetLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device_, downSetLayout_, nullptr);
     if (sampler_ != VK_NULL_HANDLE) vkDestroySampler(device_, sampler_, nullptr);
     downPipeline_ = VK_NULL_HANDLE;
+    upPipeline_ = VK_NULL_HANDLE;
     downPipelineLayout_ = VK_NULL_HANDLE;
     downDescPool_ = VK_NULL_HANDLE;
     downDescSets_.clear();
+    upDescSets_.clear();
     downSetLayout_ = VK_NULL_HANDLE;
     sampler_ = VK_NULL_HANDLE;
 }
@@ -791,22 +861,51 @@ bool VulkanContext::dispatchDown() {
         vkCmdPushConstants(cmd_, downPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
         vkCmdDispatch(cmd_, (dst.width + 15u) / 16u, (dst.height + 15u) / 16u, 1);
 
+        // Every down level is sampled by the next down or the first upsample.
+        barrierImage(cmd_, dst.image,
+                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_GENERAL,
+                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        LOGI("kawase down[%u] %ux%u -> %ux%u", i, src.width, src.height, dst.width, dst.height);
+    }
+
+    vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, upPipeline_);
+    for (uint32_t i = 0; i < kDownPasses; ++i) {
+        const VulkanImage& src = (i == 0) ? downImages_.back() : upImages_[i - 1];
+        VulkanImage& dst = upImages_[i];
+
+        barrierImage(cmd_, dst.image,
+                     VK_PIPELINE_STAGE_2_NONE, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_GENERAL);
+
+        vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, downPipelineLayout_, 0, 1,
+                                &upDescSets_[i], 0, nullptr);
+        KawasePush push{};
+        push.texelX = 1.0f / static_cast<float>(src.width);
+        push.texelY = 1.0f / static_cast<float>(src.height);
+        push.offset = kDownOffset;
+        push.intensity = 1.0f;
+        push.resX = static_cast<float>(dst.width);
+        push.resY = static_cast<float>(dst.height);
+        vkCmdPushConstants(cmd_, downPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+        vkCmdDispatch(cmd_, (dst.width + 15u) / 16u, (dst.height + 15u) / 16u, 1);
+
         if (i + 1 < kDownPasses) {
-            // Next pass samples this level.
             barrierImage(cmd_, dst.image,
                          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                          VK_IMAGE_LAYOUT_GENERAL,
                          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         } else {
-            // Last level: blit to swapchain.
             barrierImage(cmd_, dst.image,
                          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                          VK_IMAGE_LAYOUT_GENERAL,
                          VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         }
-        LOGI("kawase down[%u] %ux%u -> %ux%u", i, src.width, src.height, dst.width, dst.height);
+        LOGI("kawase up[%u] %ux%u -> %ux%u", i, src.width, src.height, dst.width, dst.height);
     }
 
     VK_TRY(vkEndCommandBuffer(cmd_));
@@ -969,7 +1068,7 @@ bool VulkanContext::presentTest() {
         VkImageBlit blit{};
         blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         blit.srcSubresource.layerCount = 1;
-        const VulkanImage& src = downImages_.back();
+        const VulkanImage& src = upImages_.back();
         blit.srcOffsets[1] = {static_cast<int32_t>(src.width), static_cast<int32_t>(src.height), 1};
         blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         blit.dstSubresource.layerCount = 1;
@@ -1041,8 +1140,8 @@ std::string VulkanContext::info() const {
     const bool timestamps = props_.limits.timestampComputeAndGraphics == VK_TRUE &&
                             props_.limits.timestampPeriod > 0.0f;
     std::string s;
-    s += "VulkanBlur Phase 5\n";
-    s += "status=kawase-pyramid\n";
+    s += "VulkanBlur Phase 6\n";
+    s += "status=kawase-up\n";
     s += "device=";
     s += props_.deviceName;
     s += "\n";
@@ -1096,6 +1195,12 @@ std::string VulkanContext::info() const {
     s += std::to_string(testImage_.height);
     for (const auto& img : downImages_) {
         s += " -> ";
+        s += std::to_string(img.width);
+        s += "x";
+        s += std::to_string(img.height);
+    }
+    for (const auto& img : upImages_) {
+        s += " => ";
         s += std::to_string(img.width);
         s += "x";
         s += std::to_string(img.height);
