@@ -191,6 +191,7 @@ VulkanContext::~VulkanContext() {
     destroySwapchain();
     if (acquireSem_ != VK_NULL_HANDLE) vkDestroySemaphore(device_, acquireSem_, nullptr);
     if (presentSem_ != VK_NULL_HANDLE) vkDestroySemaphore(device_, presentSem_, nullptr);
+    if (fence_ != VK_NULL_HANDLE) vkDestroyFence(device_, fence_, nullptr);
     if (commandPool_ != VK_NULL_HANDLE) {
         vkDestroyCommandPool(device_, commandPool_, nullptr);
     }
@@ -454,6 +455,10 @@ bool VulkanContext::createSyncObjects() {
     si.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     VK_TRY(vkCreateSemaphore(device_, &si, nullptr, &acquireSem_));
     VK_TRY(vkCreateSemaphore(device_, &si, nullptr, &presentSem_));
+    VkFenceCreateInfo fi{};
+    fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    VK_TRY(vkCreateFence(device_, &fi, nullptr, &fence_));
     return true;
 }
 
@@ -550,12 +555,13 @@ bool VulkanContext::uploadTestTexture() {
                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     VK_TRY(vkEndCommandBuffer(cmd_));
+    VK_TRY(vkResetFences(device_, 1, &fence_));
     VkSubmitInfo submit{};
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &cmd_;
-    VK_TRY(vkQueueSubmit(queue_, 1, &submit, VK_NULL_HANDLE));
-    VK_TRY(vkQueueWaitIdle(queue_));
+    VK_TRY(vkQueueSubmit(queue_, 1, &submit, fence_));
+    VK_TRY(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX));
     staging.destroy();
     vkResetCommandBuffer(cmd_, 0);
     return true;
@@ -729,6 +735,7 @@ bool VulkanContext::presentTest() {
 
         VK_TRY(vkEndCommandBuffer(cmd_));
 
+        VK_TRY(vkResetFences(device_, 1, &fence_));
         VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
         VkSubmitInfo submit{};
         submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -739,7 +746,7 @@ bool VulkanContext::presentTest() {
         submit.pCommandBuffers = &cmd_;
         submit.signalSemaphoreCount = 1;
         submit.pSignalSemaphores = &presentSem_;
-        VK_TRY(vkQueueSubmit(queue_, 1, &submit, VK_NULL_HANDLE));
+        VK_TRY(vkQueueSubmit(queue_, 1, &submit, fence_));
 
         VkPresentInfoKHR present{};
         present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -750,7 +757,7 @@ bool VulkanContext::presentTest() {
         present.pImageIndices = &index;
         VkResult presented = vkQueuePresentKHR(queue_, &present);
         if (presented == VK_ERROR_OUT_OF_DATE_KHR || presented == VK_SUBOPTIMAL_KHR) {
-            VK_TRY(vkQueueWaitIdle(queue_));
+            VK_TRY(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX));
             vkDeviceWaitIdle(device_);
             if (!createSwapchain()) return false;
             if (!ensureWorkingResources()) return false;
@@ -761,8 +768,8 @@ bool VulkanContext::presentTest() {
             LOGE("%s", error_.c_str());
             return false;
         }
-        // ponytail: QueueWaitIdle after the test present; in-flight fences when we have a frame loop.
-        VK_TRY(vkQueueWaitIdle(queue_));
+        // Wait for the blit fence only — not the whole queue (frame-loop ready).
+        VK_TRY(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX));
         return true;
     }
     return true;
@@ -840,8 +847,8 @@ std::string VulkanContext::info() const {
     const int w = window_ ? ANativeWindow_getWidth(window_) : 0;
     const int h = window_ ? ANativeWindow_getHeight(window_) : 0;
     std::string s;
-    s += "VulkanBlur Phase 12\n";
-    s += "status=debug\n";
+    s += "VulkanBlur Phase 13\n";
+    s += "status=fence\n";
     s += "device=";
     s += props_.deviceName;
     s += "\n";

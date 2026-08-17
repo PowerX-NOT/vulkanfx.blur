@@ -38,6 +38,8 @@ public:
 private:
     bool ensurePipelines(std::string* error);
     bool ensureQueryPool(std::string* error);
+    bool ensureFence(std::string* error);
+    bool submitAndWait(VkCommandBuffer cmd, VkQueue queue, std::string* error);
     bool rebuildPyramid(const VulkanImage& src, uint32_t passes, std::string* error);
     void destroyPyramid();
     bool createComputePipeline(const uint32_t* spv, size_t bytes, VkPipeline* out, std::string* error);
@@ -69,4 +71,5 @@ private:
     VkPipeline upPipeline_ = VK_NULL_HANDLE;
     VkDescriptorPool descPool_ = VK_NULL_HANDLE;
     VkQueryPool queryPool_ = VK_NULL_HANDLE;
+    VkFence fence_ = VK_NULL_HANDLE;
 };

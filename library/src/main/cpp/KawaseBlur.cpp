@@ -89,12 +89,14 @@ void KawaseBlur::destroy() {
     if (device_ == VK_NULL_HANDLE) return;
     destroyPyramid();
     if (queryPool_ != VK_NULL_HANDLE) vkDestroyQueryPool(device_, queryPool_, nullptr);
+    if (fence_ != VK_NULL_HANDLE) vkDestroyFence(device_, fence_, nullptr);
     if (upPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, upPipeline_, nullptr);
     if (downPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, downPipeline_, nullptr);
     if (pipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
     if (setLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device_, setLayout_, nullptr);
     if (sampler_ != VK_NULL_HANDLE) vkDestroySampler(device_, sampler_, nullptr);
     queryPool_ = VK_NULL_HANDLE;
+    fence_ = VK_NULL_HANDLE;
     upPipeline_ = VK_NULL_HANDLE;
     downPipeline_ = VK_NULL_HANDLE;
     pipelineLayout_ = VK_NULL_HANDLE;
@@ -249,6 +251,27 @@ bool KawaseBlur::ensureQueryPool(std::string* error) {
     return true;
 }
 
+bool KawaseBlur::ensureFence(std::string* error) {
+    if (fence_ != VK_NULL_HANDLE) return true;
+    VkFenceCreateInfo fi{};
+    fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    KB_TRY(vkCreateFence(device_, &fi, nullptr, &fence_));
+    return true;
+}
+
+bool KawaseBlur::submitAndWait(VkCommandBuffer cmd, VkQueue queue, std::string* error) {
+    KB_TRY(vkResetFences(device_, 1, &fence_));
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cmd;
+    KB_TRY(vkQueueSubmit(queue, 1, &submit, fence_));
+    KB_TRY(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX));
+    vkResetCommandBuffer(cmd, 0);
+    return true;
+}
+
 void KawaseBlur::writeTimestamp(VkCommandBuffer cmd, uint32_t query) {
     if (queryPool_ == VK_NULL_HANDLE) return;
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool_, query);
@@ -338,6 +361,7 @@ bool KawaseBlur::create(VkDevice device, VkPhysicalDevice physical, const Vulkan
     offset_ = mapped.offset;
     if (!ensurePipelines(error)) return false;
     if (!ensureQueryPool(error)) return false;
+    if (!ensureFence(error)) return false;
     return rebuildPyramid(src, mapped.passes, error);
 }
 
@@ -450,13 +474,7 @@ bool KawaseBlur::execute(VkCommandBuffer cmd, VkQueue queue, std::string* error)
     writeTimestamp(cmd, kTsEnd);
 
     KB_TRY(vkEndCommandBuffer(cmd));
-    VkSubmitInfo submit{};
-    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &cmd;
-    KB_TRY(vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE));
-    KB_TRY(vkQueueWaitIdle(queue));
-    vkResetCommandBuffer(cmd, 0);
+    if (!submitAndWait(cmd, queue, error)) return false;
     preparedDebugLevel_ = -1;
 
     lastDownMs_ = lastUpMs_ = lastTotalMs_ = -1.0f;
@@ -518,13 +536,7 @@ bool KawaseBlur::preparePresent(VkCommandBuffer cmd, VkQueue queue, std::string*
                  VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     KB_TRY(vkEndCommandBuffer(cmd));
-    VkSubmitInfo submit{};
-    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &cmd;
-    KB_TRY(vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE));
-    KB_TRY(vkQueueWaitIdle(queue));
-    vkResetCommandBuffer(cmd, 0);
+    if (!submitAndWait(cmd, queue, error)) return false;
     preparedDebugLevel_ = debugLevel_;
     LOGI("debug present level=%d %ux%u", debugLevel_, img.width, img.height);
     return true;

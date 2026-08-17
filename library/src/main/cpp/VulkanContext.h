@@ -61,6 +61,7 @@ private:
     VkCommandBuffer cmd_ = VK_NULL_HANDLE;
     VkSemaphore acquireSem_ = VK_NULL_HANDLE;
     VkSemaphore presentSem_ = VK_NULL_HANDLE;
+    VkFence fence_ = VK_NULL_HANDLE;
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
     VkFormat swapchainFormat_ = VK_FORMAT_UNDEFINED;
     VkColorSpaceKHR swapchainColorSpace_ = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
