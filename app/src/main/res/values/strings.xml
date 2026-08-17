@@ -1,5 +1,11 @@
 <resources>
     <string name="app_name">Vulkan Blur Demo</string>
+    <string name="home_title">Blur Playground</string>
+    <string name="home_subtitle">Pick a demo to open. More Material 3 experiments will be added here.</string>
+    <string name="option_test_blur">Test Blur</string>
+    <string name="option_blur_alpha">Blur + Alpha (coming soon)</string>
+    <string name="option_card_clips">Card Clips (coming soon)</string>
+    <string name="back_to_options">Back to options</string>
     <string name="hud_title">Blur radius</string>
     <string name="radius_value">%1$d px</string>
     <string name="timing_placeholder">GPU timing…</string>

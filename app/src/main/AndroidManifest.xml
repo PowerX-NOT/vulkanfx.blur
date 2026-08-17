@@ -16,6 +16,7 @@
             android:exported="true"
             android:label="@string/app_name"
             android:theme="@style/Theme.Blur"
+            android:enableOnBackInvokedCallback="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
