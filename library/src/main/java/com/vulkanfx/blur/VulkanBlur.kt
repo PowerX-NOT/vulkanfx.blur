@@ -13,6 +13,14 @@ class VulkanBlur {
     }
 
     @Synchronized
+    fun resize(width: Int, height: Int) {
+        if (handle != 0L) nativeResize(handle, width, height)
+    }
+
+    @Synchronized
+    fun info(): String = if (handle != 0L) nativeInfo(handle) else ""
+
+    @Synchronized
     fun detach() {
         if (handle != 0L) {
             nativeDestroy(handle)
@@ -25,6 +33,7 @@ class VulkanBlur {
         get() = handle != 0L
 
     private external fun nativeCreate(surface: Surface, enableValidation: Boolean): Long
+    private external fun nativeResize(handle: Long, width: Int, height: Int): Unit
     private external fun nativeInfo(handle: Long): String
     private external fun nativeDestroy(handle: Long)
 

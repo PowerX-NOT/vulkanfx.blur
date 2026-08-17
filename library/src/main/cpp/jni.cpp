@@ -31,6 +31,18 @@ Java_com_vulkanfx_blur_VulkanBlur_nativeCreate(JNIEnv* env, jobject, jobject sur
     return reinterpret_cast<jlong>(ctx);
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_vulkanfx_blur_VulkanBlur_nativeResize(JNIEnv* env, jobject, jlong handle, jint width, jint height) {
+    VulkanContext* ctx = fromHandle(handle);
+    if (!ctx) {
+        throwState(env, "native handle is null");
+        return;
+    }
+    if (!ctx->resize(static_cast<uint32_t>(width), static_cast<uint32_t>(height))) {
+        throwState(env, ctx->lastError().empty() ? "swapchain resize failed" : ctx->lastError().c_str());
+    }
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_vulkanfx_blur_VulkanBlur_nativeInfo(JNIEnv* env, jobject, jlong handle) {
     VulkanContext* ctx = fromHandle(handle);

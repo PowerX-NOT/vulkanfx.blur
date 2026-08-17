@@ -40,6 +40,14 @@ class VulkanBlurView @JvmOverloads constructor(
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         Log.i(TAG, "surfaceChanged ${width}x$height format=$format")
+        if (!blur.isReady) return
+        try {
+            blur.resize(width, height)
+            onStatus?.invoke(blur.info())
+        } catch (e: IllegalStateException) {
+            Log.e(TAG, "Vulkan resize failed", e)
+            onStatus?.invoke("VulkanBlur resize failed:\n${e.message}")
+        }
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {

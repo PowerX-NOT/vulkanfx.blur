@@ -5,6 +5,8 @@ project(vulkanblur LANGUAGES CXX)
 # Library: NDK stub libvulkan.so; the real ICD is loaded from the device.
 add_library(vulkanblur SHARED
     VulkanContext.cpp
+    VulkanImage.cpp
+    VulkanBuffer.cpp
     jni.cpp
 )
 
