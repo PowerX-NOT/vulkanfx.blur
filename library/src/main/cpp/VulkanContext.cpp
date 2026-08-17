@@ -839,6 +839,10 @@ bool VulkanContext::setBlurRegions(const std::vector<BlurRegion>& regions) {
     return engine_.setBlurRegions(regions);
 }
 
+bool VulkanContext::setBlurRegionTransform(const float m[9]) {
+    return engine_.setBlurRegionTransform(m);
+}
+
 bool VulkanContext::setDebugLevel(int level) {
     engine_.setDebugLevel(level);
     return true;

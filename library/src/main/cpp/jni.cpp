@@ -166,6 +166,30 @@ Java_com_vulkanfx_blur_VulkanBlur_nativeSetBlurRegions(JNIEnv* env, jobject, jlo
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_vulkanfx_blur_VulkanBlur_nativeSetBlurRegionTransform(JNIEnv* env, jobject, jlong handle,
+                                                                jfloatArray matrix) {
+    VulkanContext* ctx = fromHandle(handle);
+    if (!ctx) {
+        throwState(env, "native handle is null");
+        return;
+    }
+    if (matrix == nullptr) {
+        throwState(env, "blurRegionTransform is null");
+        return;
+    }
+    if (env->GetArrayLength(matrix) != 9) {
+        throwState(env, "blurRegionTransform must have 9 elements");
+        return;
+    }
+    jfloat elements[9]{};
+    env->GetFloatArrayRegion(matrix, 0, 9, elements);
+    if (!ctx->setBlurRegionTransform(elements)) {
+        throwState(env, ctx->lastError().empty() ? "setBlurRegionTransform failed"
+                                                 : ctx->lastError().c_str());
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_vulkanfx_blur_VulkanBlur_nativeSetDebugLevel(JNIEnv* env, jobject, jlong handle, jint level) {
     VulkanContext* ctx = fromHandle(handle);
     if (!ctx) {

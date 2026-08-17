@@ -23,6 +23,7 @@ public:
     bool setBlurAlpha(float alpha);
     bool setBlurScale(float scale);
     bool setBlurRegions(const std::vector<BlurRegion>& regions);
+    bool setBlurRegionTransform(const float m[9]);
     bool setDebugLevel(int level);
     bool setInputRgba(const uint8_t* rgba, uint32_t width, uint32_t height);
     bool render();

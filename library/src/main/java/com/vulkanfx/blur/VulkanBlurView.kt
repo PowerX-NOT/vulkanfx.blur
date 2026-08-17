@@ -88,6 +88,20 @@ class VulkanBlurView @JvmOverloads constructor(
             }
         }
 
+    /** Layer transform applied before blurRegions (AOSP blurRegionTransform). */
+    var blurRegionTransform: FloatArray = VulkanBlur.BLUR_REGION_TRANSFORM_IDENTITY
+        set(value) {
+            require(value.size == 9) { "blurRegionTransform must have 9 elements" }
+            field = value.copyOf()
+            try {
+                blur.setBlurRegionTransform(field)
+                requestRender()
+            } catch (e: IllegalStateException) {
+                Log.e(TAG, "Vulkan setBlurRegionTransform failed", e)
+                onStatus?.invoke("VulkanBlur setBlurRegionTransform failed:\n${e.message}")
+            }
+        }
+
     /** 0 = final blur output; 1..N = downsample pyramid levels. */
     var debugLevel: Int = 0
         set(value) {
@@ -158,6 +172,7 @@ class VulkanBlurView @JvmOverloads constructor(
             blur.setBlurAlpha(blurAlpha)
             blur.setBlurScale(blurScale)
             if (blurRegions.isNotEmpty()) blur.setBlurRegions(blurRegions)
+            blur.setBlurRegionTransform(blurRegionTransform)
             blur.setDebugLevel(debugLevel)
             val info = blur.attach(surface, enableValidation = debug)
             onStatus?.invoke(info)

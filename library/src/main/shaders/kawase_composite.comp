@@ -21,8 +21,24 @@ layout(push_constant) uniform Params {
     float radTR;
     float radBR;
     float radBL;
+    float invM0;
+    float invM1;
+    float invM2;
+    float invM3;
+    float invM4;
+    float invM5;
+    float invM6;
+    float invM7;
+    float invM8;
     int clipRRect;
 } p;
+
+vec2 screenToRegion(vec2 screenPx) {
+    return vec2(
+        p.invM0 * screenPx.x + p.invM3 * screenPx.y + p.invM6,
+        p.invM1 * screenPx.x + p.invM4 * screenPx.y + p.invM7
+    );
+}
 
 vec2 zoomUv(vec2 uv) {
     if (p.blurScale == 1.0) {
@@ -58,7 +74,7 @@ void main() {
     if (p.clipRRect != 0) {
         const vec2 center = vec2(p.rectL + p.rectR, p.rectT + p.rectB) * 0.5;
         const vec2 halfSize = vec2(p.rectR - p.rectL, p.rectB - p.rectT) * 0.5;
-        const vec2 local = vec2(px) + 0.5 - center;
+        const vec2 local = screenToRegion(vec2(px) + 0.5) - center;
         const float dist = sdRoundRect(local, halfSize, vec4(p.radTL, p.radTR, p.radBR, p.radBL));
         // dist<0 => inside the rounded rect (SDF convention), dist>0 => outside.
         // We want blur inside (mask~1) and sharp outside (mask~0).

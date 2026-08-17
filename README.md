@@ -111,6 +111,7 @@ blur.detach()          // destroy Vulkan context
 | `setBlurAlpha(alpha)` | Compositing alpha when drawing full-frame background blur (`drawBlurRegion` alpha). |
 | `setBlurScale(scale)` | Zoom around blur center (`backgroundBlurScale`). |
 | `setBlurRegions(regions)` | Rounded-rect blurred clips (`BlurRegion` list, AOSP `blurRegions`). |
+| `setBlurRegionTransform(matrix)` | 3×3 column-major affine before region draws (AOSP `blurRegionTransform`). |
 | `setDebugLevel(level)` | `0` = final output; `1..N` = downsample pyramid stage (debug). |
 | `render()` | Record Kawase passes + blit to swapchain + present. |
 | `resize(w, h)` | Swapchain recreate on surface size change. |
@@ -160,11 +161,12 @@ The demo draws a synthetic wallpaper (`DemoScene` in `:app` only) and exposes th
 | `backgroundBlurRadius`, `backgroundBlurScale` | `setBlurRadius`, `setBlurScale` |
 | `layerAlpha` → radius scale | `setLayerAlpha` |
 | `BlurRegion` rounded clips | `setBlurRegions` / `BlurRegion` |
+| `blurRegionTransform` | `setBlurRegionTransform` (3×3 affine) |
 | Kawase V2 pyramid | `KawaseBlur` |
+| Blur radius caching (per frame) | Reuses pyramid output when multiple regions share a radius |
 
 **Not in scope for an app/library module** (SurfaceFlinger / full system compositor):
 
-- `blurRegionTransform` (identity assumed)
 - `layerHasBlur` opaque-layer skip (no layer content pipeline)
 - Live multi-layer snapshots (host supplies one bitmap)
 - `Transaction.setBackgroundBlurRadius` / SF integration

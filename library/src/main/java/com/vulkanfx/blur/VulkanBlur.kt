@@ -16,6 +16,7 @@ class VulkanBlur {
     private var pendingBlurAlpha: Float = 1f
     private var pendingBlurScale: Float = 1f
     private var pendingRegions: Array<BlurRegion> = emptyArray()
+    private var pendingBlurRegionTransform: FloatArray = BLUR_REGION_TRANSFORM_IDENTITY.copyOf()
     private var pendingBitmap: Bitmap? = null
     private var inputReady = false
 
@@ -33,6 +34,7 @@ class VulkanBlur {
         if (pendingRegions.isNotEmpty()) {
             nativeSetBlurRegions(handle, pendingRegions)
         }
+        nativeSetBlurRegionTransform(handle, pendingBlurRegionTransform)
         pendingBitmap?.let {
             nativeSetInputBitmap(handle, it)
             pendingBitmap = null
@@ -86,6 +88,17 @@ class VulkanBlur {
 
     @Synchronized
     fun clearBlurRegions() = setBlurRegions(emptyList())
+
+    /**
+     * AOSP [LayerSettings.blurRegionTransform] — column-major 3×3 affine applied before
+     * [BlurRegion] draws. Use [BLUR_REGION_TRANSFORM_IDENTITY] for no transform.
+     */
+    @Synchronized
+    fun setBlurRegionTransform(matrix: FloatArray) {
+        require(matrix.size == 9) { "blurRegionTransform must have 9 elements" }
+        pendingBlurRegionTransform = matrix.copyOf()
+        if (handle != 0L) nativeSetBlurRegionTransform(handle, pendingBlurRegionTransform)
+    }
 
     /**
      * Pyramid inspect: 0 = final blur, 1 = first downsample, …, N = lowest level.
@@ -156,6 +169,7 @@ class VulkanBlur {
     private external fun nativeSetBlurAlpha(handle: Long, alpha: Float)
     private external fun nativeSetBlurScale(handle: Long, scale: Float)
     private external fun nativeSetBlurRegions(handle: Long, regions: Array<BlurRegion>)
+    private external fun nativeSetBlurRegionTransform(handle: Long, matrix: FloatArray)
     private external fun nativeSetDebugLevel(handle: Long, level: Int)
     private external fun nativeSetInputBitmap(handle: Long, bitmap: Bitmap)
     private external fun nativeRender(handle: Long)
@@ -166,6 +180,13 @@ class VulkanBlur {
     private external fun nativeDestroy(handle: Long)
 
     companion object {
+        /** Column-major 3×3 identity (no region transform). */
+        val BLUR_REGION_TRANSFORM_IDENTITY = floatArrayOf(
+            1f, 0f, 0f,
+            0f, 1f, 0f,
+            0f, 0f, 1f,
+        )
+
         init {
             System.loadLibrary("vulkanblur")
         }

@@ -26,6 +26,8 @@ public:
     bool setFullFrameBlurAlpha(float alpha);
     bool setLegacyRadius(float radius);
     bool setBlurRegions(const std::vector<BlurRegion>& regions);
+    /** Column-major 3×3 affine (AOSP LayerSettings::blurRegionTransform). */
+    bool setBlurRegionTransform(const float m[9]);
     void setDebugLevel(int level);
     int debugLevel() const { return generator_.debugLevel(); }
 
@@ -54,6 +56,7 @@ private:
         float mixFactor;
         float rectL, rectT, rectR, rectB;
         float radTL, radTR, radBR, radBL;
+        float invTransform[9];
         int32_t clipRRect;
     };
 
@@ -86,6 +89,7 @@ private:
     float fullFrameBlurAlpha_ = 1.f;
     float legacyRadius_ = 24.f;
     std::vector<BlurRegion> blurRegions_;
+    float blurRegionInvTransform_[9]{1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f};
 
     VkSampler samplerMirror_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout setLayout_ = VK_NULL_HANDLE;

@@ -15,6 +15,28 @@ namespace {
 
 constexpr float kMaxCrossFadeRadius = 10.0f;
 
+bool invertAffine3(const float m[9], float out[9]) {
+    const float a = m[0];
+    const float b = m[1];
+    const float c = m[3];
+    const float d = m[4];
+    const float tx = m[6];
+    const float ty = m[7];
+    const float det = a * d - b * c;
+    if (std::abs(det) < 1e-8f) return false;
+    const float id = 1.f / det;
+    out[0] = d * id;
+    out[1] = -b * id;
+    out[2] = 0.f;
+    out[3] = -c * id;
+    out[4] = a * id;
+    out[5] = 0.f;
+    out[6] = (c * ty - d * tx) * id;
+    out[7] = (b * tx - a * ty) * id;
+    out[8] = 1.f;
+    return true;
+}
+
 #define BE_TRY(expr)                                                       \
     do {                                                                   \
         VkResult _r = (expr);                                              \
@@ -204,6 +226,13 @@ bool BlurEngine::setBlurRegions(const std::vector<BlurRegion>& regions) {
     return true;
 }
 
+bool BlurEngine::setBlurRegionTransform(const float m[9]) {
+    float inv[9]{};
+    if (!invertAffine3(m, inv)) return false;
+    for (int i = 0; i < 9; ++i) blurRegionInvTransform_[i] = inv[i];
+    return true;
+}
+
 void BlurEngine::setDebugLevel(int level) {
     generator_.setDebugLevel(level);
 }
@@ -320,12 +349,16 @@ bool BlurEngine::drawBlurRegion(VkCommandBuffer cmd, const VulkanImage& blurred,
         push.radTR = region->cornerRadiusTR;
         push.radBR = region->cornerRadiusBR;
         push.radBL = region->cornerRadiusBL;
+        for (int i = 0; i < 9; ++i) push.invTransform[i] = blurRegionInvTransform_[i];
     } else {
         push.clipRRect = 0;
         push.rectL = 0.f;
         push.rectT = 0.f;
         push.rectR = static_cast<float>(composite_.width);
         push.rectB = static_cast<float>(composite_.height);
+        for (int i = 0; i < 9; ++i) {
+            push.invTransform[i] = (i % 4 == 0) ? 1.f : 0.f;
+        }
     }
     vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
     vkCmdDispatch(cmd, (composite_.width + 15u) / 16u, (composite_.height + 15u) / 16u, 1);
@@ -356,9 +389,11 @@ bool BlurEngine::record(VkCommandBuffer cmd, std::string* error) {
 
     if (!copyInputToComposite(cmd)) return false;
 
+    int cachedBlurRadius = -1;
     const int bgRadius = effectiveBackgroundRadius();
     if (bgRadius > 0) {
         if (!runBlur(cmd, static_cast<float>(bgRadius), error)) return false;
+        cachedBlurRadius = bgRadius;
         const VulkanImage& blurred = pureBlurImage();
         imageBarrier(cmd, cmdBarrier2_, blurred.image,
                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
@@ -377,7 +412,10 @@ bool BlurEngine::record(VkCommandBuffer cmd, std::string* error) {
         }
         const float drawAlpha = region.alpha * layerAlpha_;
         if (drawAlpha <= 0.f) continue;
-        if (!runBlur(cmd, static_cast<float>(region.blurRadius), error)) return false;
+        if (static_cast<int>(region.blurRadius) != cachedBlurRadius) {
+            if (!runBlur(cmd, static_cast<float>(region.blurRadius), error)) return false;
+            cachedBlurRadius = static_cast<int>(region.blurRadius);
+        }
         const VulkanImage& blurred = pureBlurImage();
         imageBarrier(cmd, cmdBarrier2_, blurred.image,
                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
