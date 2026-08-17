@@ -12,6 +12,9 @@ import com.vulkanfx.blur.BlurRegion
 
 /** Demo-only wallpaper bitmap for the sample app (not part of the library). */
 object DemoScene {
+    const val WALLPAPER_WIDTH = 720
+    const val WALLPAPER_HEIGHT = 1280
+
     /** AOSP-style blurRegions over the 720×1280 demo wallpaper. */
     fun cardBlurRegions(blurRadius: Int): List<BlurRegion> = listOf(
         BlurRegion(
@@ -52,7 +55,7 @@ object DemoScene {
         ),
     )
 
-    fun wallpaper(width: Int = 720, height: Int = 1280): Bitmap {
+    fun wallpaper(width: Int = WALLPAPER_WIDTH, height: Int = WALLPAPER_HEIGHT): Bitmap {
         val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val c = Canvas(bmp)
 

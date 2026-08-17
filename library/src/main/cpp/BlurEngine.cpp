@@ -8,6 +8,10 @@ static const uint32_t kCompositeSpv[] =
 #include "kawase_composite_comp_spv.inc"
         ;
 
+static const uint32_t kGlassRimSpv[] =
+#include "glass_rim_comp_spv.inc"
+        ;
+
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "VulkanBlur", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "VulkanBlur", __VA_ARGS__)
 
@@ -54,16 +58,25 @@ void BlurEngine::destroy() {
     generator_.destroy();
     composite_.destroy();
     if (descPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(device_, descPool_, nullptr);
+    if (rimDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(device_, rimDescPool_, nullptr);
     if (compositePipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, compositePipeline_, nullptr);
+    if (glassRimPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, glassRimPipeline_, nullptr);
     if (pipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
+    if (rimPipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device_, rimPipelineLayout_, nullptr);
     if (setLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device_, setLayout_, nullptr);
+    if (rimSetLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device_, rimSetLayout_, nullptr);
     if (samplerMirror_ != VK_NULL_HANDLE) vkDestroySampler(device_, samplerMirror_, nullptr);
     descPool_ = VK_NULL_HANDLE;
+    rimDescPool_ = VK_NULL_HANDLE;
     compositePipeline_ = VK_NULL_HANDLE;
+    glassRimPipeline_ = VK_NULL_HANDLE;
     pipelineLayout_ = VK_NULL_HANDLE;
+    rimPipelineLayout_ = VK_NULL_HANDLE;
     setLayout_ = VK_NULL_HANDLE;
+    rimSetLayout_ = VK_NULL_HANDLE;
     samplerMirror_ = VK_NULL_HANDLE;
     compositeSet_ = VK_NULL_HANDLE;
+    glassRimSet_ = VK_NULL_HANDLE;
     inputView_ = VK_NULL_HANDLE;
     compositeReady_ = false;
     srcW_ = srcH_ = 0;
@@ -77,7 +90,8 @@ bool BlurEngine::init(VkDevice device, VkPhysicalDevice physical, uint32_t queue
     queueFamily_ = queueFamily;
     cmdBarrier2_ = cmdBarrier2;
     generator_.setExternalComposite(true);
-    return ensureCompositePipeline(error);
+    if (!ensureCompositePipeline(error)) return false;
+    return ensureGlassRimPipeline(error);
 }
 
 bool BlurEngine::ensureCompositePipeline(std::string* error) {
@@ -146,9 +160,60 @@ bool BlurEngine::ensureCompositePipeline(std::string* error) {
     return true;
 }
 
+bool BlurEngine::ensureGlassRimPipeline(std::string* error) {
+    if (glassRimPipeline_ != VK_NULL_HANDLE) return true;
+
+    VkDescriptorSetLayoutBinding bind{};
+    bind.binding = 0;
+    bind.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bind.descriptorCount = 1;
+    bind.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    VkDescriptorSetLayoutCreateInfo sl{};
+    sl.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    sl.bindingCount = 1;
+    sl.pBindings = &bind;
+    BE_TRY(vkCreateDescriptorSetLayout(device_, &sl, nullptr, &rimSetLayout_));
+
+    VkPushConstantRange pc{};
+    pc.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pc.offset = 0;
+    pc.size = sizeof(GlassRimPush);
+    VkPipelineLayoutCreateInfo pl{};
+    pl.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pl.setLayoutCount = 1;
+    pl.pSetLayouts = &rimSetLayout_;
+    pl.pushConstantRangeCount = 1;
+    pl.pPushConstantRanges = &pc;
+    BE_TRY(vkCreatePipelineLayout(device_, &pl, nullptr, &rimPipelineLayout_));
+
+    VkShaderModuleCreateInfo sm{};
+    sm.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    sm.codeSize = sizeof(kGlassRimSpv);
+    sm.pCode = kGlassRimSpv;
+    VkShaderModule module = VK_NULL_HANDLE;
+    BE_TRY(vkCreateShaderModule(device_, &sm, nullptr, &module));
+    VkPipelineShaderStageCreateInfo stage{};
+    stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    stage.module = module;
+    stage.pName = "main";
+    VkComputePipelineCreateInfo ci{};
+    ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    ci.stage = stage;
+    ci.layout = rimPipelineLayout_;
+    VkResult pipe = vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &ci, nullptr, &glassRimPipeline_);
+    vkDestroyShaderModule(device_, module, nullptr);
+    if (pipe != VK_SUCCESS) {
+        if (error) *error = "BlurEngine glass rim pipeline failed";
+        return false;
+    }
+    return true;
+}
+
 bool BlurEngine::ensureCompositeImage(uint32_t w, uint32_t h, std::string* error) {
+    if (!ensureGlassRimPipeline(error)) return false;
     if (composite_.image != VK_NULL_HANDLE && composite_.width == w && composite_.height == h &&
-        compositeSet_ != VK_NULL_HANDLE) {
+        compositeSet_ != VK_NULL_HANDLE && glassRimSet_ != VK_NULL_HANDLE) {
         return true;
     }
     composite_.destroy();
@@ -156,6 +221,11 @@ bool BlurEngine::ensureCompositeImage(uint32_t w, uint32_t h, std::string* error
         vkDestroyDescriptorPool(device_, descPool_, nullptr);
         descPool_ = VK_NULL_HANDLE;
         compositeSet_ = VK_NULL_HANDLE;
+    }
+    if (rimDescPool_ != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(device_, rimDescPool_, nullptr);
+        rimDescPool_ = VK_NULL_HANDLE;
+        glassRimSet_ = VK_NULL_HANDLE;
     }
     const VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -179,6 +249,23 @@ bool BlurEngine::ensureCompositeImage(uint32_t w, uint32_t h, std::string* error
     alloc.descriptorSetCount = 1;
     alloc.pSetLayouts = &setLayout_;
     BE_TRY(vkAllocateDescriptorSets(device_, &alloc, &compositeSet_));
+
+    VkDescriptorPoolSize rimPoolSize{};
+    rimPoolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    rimPoolSize.descriptorCount = 1;
+    VkDescriptorPoolCreateInfo rimPool{};
+    rimPool.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    rimPool.maxSets = 1;
+    rimPool.poolSizeCount = 1;
+    rimPool.pPoolSizes = &rimPoolSize;
+    BE_TRY(vkCreateDescriptorPool(device_, &rimPool, nullptr, &rimDescPool_));
+    VkDescriptorSetAllocateInfo rimAlloc{};
+    rimAlloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    rimAlloc.descriptorPool = rimDescPool_;
+    rimAlloc.descriptorSetCount = 1;
+    rimAlloc.pSetLayouts = &rimSetLayout_;
+    BE_TRY(vkAllocateDescriptorSets(device_, &rimAlloc, &glassRimSet_));
+
     compositeReady_ = false;
     return true;
 }
@@ -230,6 +317,16 @@ bool BlurEngine::setBlurRegionTransform(const float m[9]) {
     float inv[9]{};
     if (!invertAffine3(m, inv)) return false;
     for (int i = 0; i < 9; ++i) blurRegionInvTransform_[i] = inv[i];
+    return true;
+}
+
+bool BlurEngine::setGlassRimEnabled(bool enabled) {
+    glassRimEnabled_ = enabled;
+    return true;
+}
+
+bool BlurEngine::setGlassRimNightMode(bool night) {
+    glassRimNightMode_ = night;
     return true;
 }
 
@@ -372,6 +469,47 @@ bool BlurEngine::drawBlurRegion(VkCommandBuffer cmd, const VulkanImage& blurred,
     return true;
 }
 
+bool BlurEngine::drawGlassRim(VkCommandBuffer cmd, const BlurRegion& region) {
+    VkDescriptorImageInfo dst{};
+    dst.imageView = composite_.view;
+    dst.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = glassRimSet_;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    write.pImageInfo = &dst;
+    vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, glassRimPipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, rimPipelineLayout_, 0, 1, &glassRimSet_,
+                            0, nullptr);
+    GlassRimPush push{};
+    push.resX = static_cast<float>(composite_.width);
+    push.resY = static_cast<float>(composite_.height);
+    push.rectL = static_cast<float>(region.left);
+    push.rectT = static_cast<float>(region.top);
+    push.rectR = static_cast<float>(region.right);
+    push.rectB = static_cast<float>(region.bottom);
+    push.radTL = region.cornerRadiusTL;
+    push.radTR = region.cornerRadiusTR;
+    push.radBR = region.cornerRadiusBR;
+    push.radBL = region.cornerRadiusBL;
+    for (int i = 0; i < 9; ++i) push.invTransform[i] = blurRegionInvTransform_[i];
+    push.nightMode = glassRimNightMode_ ? 1 : 0;
+    vkCmdPushConstants(cmd, rimPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+    vkCmdDispatch(cmd, (composite_.width + 15u) / 16u, (composite_.height + 15u) / 16u, 1);
+    imageBarrier(cmd, cmdBarrier2_, composite_.image,
+                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+                 VK_IMAGE_LAYOUT_GENERAL,
+                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+                 VK_IMAGE_LAYOUT_GENERAL);
+    return true;
+}
+
 bool BlurEngine::record(VkCommandBuffer cmd, std::string* error) {
     if (generator_.passes() == 0 || composite_.image == VK_NULL_HANDLE) {
         if (error) *error = "BlurEngine not ready";
@@ -426,6 +564,9 @@ bool BlurEngine::record(VkCommandBuffer cmd, std::string* error) {
                             &region)) {
             return false;
         }
+        if (glassRimEnabled_ && !drawGlassRim(cmd, region)) {
+            return false;
+        }
     }
 
     imageBarrier(cmd, cmdBarrier2_, composite_.image,
@@ -449,6 +590,8 @@ std::string BlurEngine::infoExtra() const {
     s += std::to_string(fullFrameBlurAlpha_);
     s += "\nblurRegions=";
     s += std::to_string(blurRegions_.size());
+    s += "\nglassRim=";
+    s += glassRimEnabled_ ? "yes" : "no";
     s += "\n";
     return s;
 }

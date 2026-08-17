@@ -33,6 +33,7 @@ class MainActivity : Activity() {
     private var layerAlphaPct = 100
     private var blurAlphaPct = 70
     private var blurScalePct = 50
+    private var showGlassRim = true
 
     private val backInvokedCallback = OnBackInvokedCallback { handleBack() }
 
@@ -48,6 +49,7 @@ class MainActivity : Activity() {
         layerAlphaPct = savedInstanceState?.getInt(KEY_LAYER_ALPHA, 100) ?: 100
         blurAlphaPct = savedInstanceState?.getInt(KEY_BLUR_ALPHA, 70) ?: 70
         blurScalePct = savedInstanceState?.getInt(KEY_BLUR_SCALE, 50) ?: 50
+        showGlassRim = savedInstanceState?.getBoolean(KEY_SHOW_GLASS_RIM, true) ?: true
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             onBackInvokedDispatcher.registerOnBackInvokedCallback(
@@ -218,7 +220,7 @@ class MainActivity : Activity() {
     }
 
     private fun showCardClipsDemo() {
-        showDemoScreen(blurRegions = cardClipRegions())
+        showDemoScreen(blurRegions = cardClipRegions(), enableGlassRimToggle = true)
     }
 
     private fun cardClipRegions(): List<BlurRegion> = DemoScene.cardBlurRegions(radius)
@@ -229,6 +231,7 @@ class MainActivity : Activity() {
         initialBlurAlpha: Float = 1f,
         initialBlurScale: Float = 1f,
         blurRegions: List<BlurRegion> = emptyList(),
+        enableGlassRimToggle: Boolean = false,
     ) {
         val deviceInfo = TextView(this).apply {
             setTextColor(Color.WHITE)
@@ -245,6 +248,9 @@ class MainActivity : Activity() {
             blurAlpha = initialBlurAlpha
             blurScale = initialBlurScale
             this.blurRegions = blurRegions
+            if (enableGlassRimToggle) {
+                glassRimEnabled = showGlassRim
+            }
             setInputBitmap(DemoScene.wallpaper())
             onStatus = { deviceInfo.text = it }
         }
@@ -360,6 +366,20 @@ class MainActivity : Activity() {
             layerAlphaSlider?.let { addView(it) }
             blurAlphaSlider?.let { addView(it) }
             blurScaleSlider?.let { addView(it) }
+            if (enableGlassRimToggle) {
+                addView(Switch(context).apply {
+                    text = getString(R.string.show_glass_rim)
+                    setTextColor(Color.WHITE)
+                    val accent = 0xFF34D399.toInt()
+                    thumbTintList = ColorStateList.valueOf(accent)
+                    trackTintList = ColorStateList.valueOf(accent)
+                    isChecked = showGlassRim
+                    setOnCheckedChangeListener { _: CompoundButton, checked: Boolean ->
+                        showGlassRim = checked
+                        blurView.glassRimEnabled = checked
+                    }
+                })
+            }
             addView(Switch(context).apply {
                 text = getString(R.string.show_debug)
                 setTextColor(Color.WHITE)
@@ -432,6 +452,7 @@ class MainActivity : Activity() {
         outState.putInt(KEY_LAYER_ALPHA, layerAlphaPct)
         outState.putInt(KEY_BLUR_ALPHA, blurAlphaPct)
         outState.putInt(KEY_BLUR_SCALE, blurScalePct)
+        outState.putBoolean(KEY_SHOW_GLASS_RIM, showGlassRim)
     }
 
     private companion object {
@@ -445,6 +466,7 @@ class MainActivity : Activity() {
         const val KEY_LAYER_ALPHA = "layer_alpha"
         const val KEY_BLUR_ALPHA = "blur_alpha"
         const val KEY_BLUR_SCALE = "blur_scale"
+        const val KEY_SHOW_GLASS_RIM = "show_glass_rim"
         const val DEFAULT_RADIUS = 24
     }
 }

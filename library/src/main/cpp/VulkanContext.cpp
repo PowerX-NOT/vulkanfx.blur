@@ -843,6 +843,14 @@ bool VulkanContext::setBlurRegionTransform(const float m[9]) {
     return engine_.setBlurRegionTransform(m);
 }
 
+bool VulkanContext::setGlassRimEnabled(bool enabled) {
+    return engine_.setGlassRimEnabled(enabled);
+}
+
+bool VulkanContext::setGlassRimNightMode(bool night) {
+    return engine_.setGlassRimNightMode(night);
+}
+
 bool VulkanContext::setDebugLevel(int level) {
     engine_.setDebugLevel(level);
     return true;

@@ -28,6 +28,8 @@ public:
     bool setBlurRegions(const std::vector<BlurRegion>& regions);
     /** Column-major 3×3 affine (AOSP LayerSettings::blurRegionTransform). */
     bool setBlurRegionTransform(const float m[9]);
+    bool setGlassRimEnabled(bool enabled);
+    bool setGlassRimNightMode(bool night);
     void setDebugLevel(int level);
     int debugLevel() const { return generator_.debugLevel(); }
 
@@ -60,12 +62,22 @@ private:
         int32_t clipRRect;
     };
 
+    struct GlassRimPush {
+        float resX, resY;
+        float rectL, rectT, rectR, rectB;
+        float radTL, radTR, radBR, radBL;
+        float invTransform[9];
+        int32_t nightMode;
+    };
+
     bool ensureCompositePipeline(std::string* error);
+    bool ensureGlassRimPipeline(std::string* error);
     bool ensureCompositeImage(uint32_t w, uint32_t h, std::string* error);
     void writeCompositeSet(VkImageView blurred, VkImageView original);
     bool copyInputToComposite(VkCommandBuffer cmd);
     bool drawBlurRegion(VkCommandBuffer cmd, const VulkanImage& blurred, float radius,
                         float blurAlpha, float blurScale, const BlurRegion* region);
+    bool drawGlassRim(VkCommandBuffer cmd, const BlurRegion& region);
     bool runBlur(VkCommandBuffer cmd, float radius, std::string* error);
     const VulkanImage& pureBlurImage() const { return generator_.blurOutput(); }
     int effectiveBackgroundRadius() const;
@@ -90,12 +102,19 @@ private:
     float legacyRadius_ = 24.f;
     std::vector<BlurRegion> blurRegions_;
     float blurRegionInvTransform_[9]{1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f};
+    bool glassRimEnabled_ = false;
+    bool glassRimNightMode_ = false;
 
     VkSampler samplerMirror_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout setLayout_ = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline compositePipeline_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout rimSetLayout_ = VK_NULL_HANDLE;
+    VkPipelineLayout rimPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline glassRimPipeline_ = VK_NULL_HANDLE;
     VkDescriptorPool descPool_ = VK_NULL_HANDLE;
+    VkDescriptorPool rimDescPool_ = VK_NULL_HANDLE;
     VkDescriptorSet compositeSet_ = VK_NULL_HANDLE;
+    VkDescriptorSet glassRimSet_ = VK_NULL_HANDLE;
     bool compositeReady_ = false;
 };

@@ -190,6 +190,32 @@ Java_com_vulkanfx_blur_VulkanBlur_nativeSetBlurRegionTransform(JNIEnv* env, jobj
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_vulkanfx_blur_VulkanBlur_nativeSetGlassRimEnabled(JNIEnv* env, jobject, jlong handle,
+                                                            jboolean enabled) {
+    VulkanContext* ctx = fromHandle(handle);
+    if (!ctx) {
+        throwState(env, "native handle is null");
+        return;
+    }
+    if (!ctx->setGlassRimEnabled(enabled == JNI_TRUE)) {
+        throwState(env, ctx->lastError().empty() ? "setGlassRimEnabled failed" : ctx->lastError().c_str());
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_vulkanfx_blur_VulkanBlur_nativeSetGlassRimNightMode(JNIEnv* env, jobject, jlong handle,
+                                                              jboolean night) {
+    VulkanContext* ctx = fromHandle(handle);
+    if (!ctx) {
+        throwState(env, "native handle is null");
+        return;
+    }
+    if (!ctx->setGlassRimNightMode(night == JNI_TRUE)) {
+        throwState(env, ctx->lastError().empty() ? "setGlassRimNightMode failed" : ctx->lastError().c_str());
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_vulkanfx_blur_VulkanBlur_nativeSetDebugLevel(JNIEnv* env, jobject, jlong handle, jint level) {
     VulkanContext* ctx = fromHandle(handle);
     if (!ctx) {

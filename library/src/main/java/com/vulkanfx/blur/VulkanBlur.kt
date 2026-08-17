@@ -17,6 +17,8 @@ class VulkanBlur {
     private var pendingBlurScale: Float = 1f
     private var pendingRegions: Array<BlurRegion> = emptyArray()
     private var pendingBlurRegionTransform: FloatArray = BLUR_REGION_TRANSFORM_IDENTITY.copyOf()
+    private var pendingGlassRimEnabled = false
+    private var pendingGlassRimNightMode = false
     private var pendingBitmap: Bitmap? = null
     private var inputReady = false
 
@@ -35,6 +37,8 @@ class VulkanBlur {
             nativeSetBlurRegions(handle, pendingRegions)
         }
         nativeSetBlurRegionTransform(handle, pendingBlurRegionTransform)
+        nativeSetGlassRimEnabled(handle, pendingGlassRimEnabled)
+        nativeSetGlassRimNightMode(handle, pendingGlassRimNightMode)
         pendingBitmap?.let {
             nativeSetInputBitmap(handle, it)
             pendingBitmap = null
@@ -98,6 +102,19 @@ class VulkanBlur {
         require(matrix.size == 9) { "blurRegionTransform must have 9 elements" }
         pendingBlurRegionTransform = matrix.copyOf()
         if (handle != 0L) nativeSetBlurRegionTransform(handle, pendingBlurRegionTransform)
+    }
+
+    /** Vulkan glass rim over each [BlurRegion]. */
+    @Synchronized
+    fun setGlassRimEnabled(enabled: Boolean) {
+        pendingGlassRimEnabled = enabled
+        if (handle != 0L) nativeSetGlassRimEnabled(handle, enabled)
+    }
+
+    @Synchronized
+    fun setGlassRimNightMode(night: Boolean) {
+        pendingGlassRimNightMode = night
+        if (handle != 0L) nativeSetGlassRimNightMode(handle, night)
     }
 
     /**
@@ -170,6 +187,8 @@ class VulkanBlur {
     private external fun nativeSetBlurScale(handle: Long, scale: Float)
     private external fun nativeSetBlurRegions(handle: Long, regions: Array<BlurRegion>)
     private external fun nativeSetBlurRegionTransform(handle: Long, matrix: FloatArray)
+    private external fun nativeSetGlassRimEnabled(handle: Long, enabled: Boolean)
+    private external fun nativeSetGlassRimNightMode(handle: Long, night: Boolean)
     private external fun nativeSetDebugLevel(handle: Long, level: Int)
     private external fun nativeSetInputBitmap(handle: Long, bitmap: Bitmap)
     private external fun nativeRender(handle: Long)

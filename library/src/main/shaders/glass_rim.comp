@@ -1,0 +1,141 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba8) uniform image2D dst;
+
+// Glass rim — gradient stroke over rounded rect, overlay blend.
+layout(push_constant) uniform Params {
+    float resX;
+    float resY;
+    float rectL;
+    float rectT;
+    float rectR;
+    float rectB;
+    float radTL;
+    float radTR;
+    float radBR;
+    float radBL;
+    float invM0;
+    float invM1;
+    float invM2;
+    float invM3;
+    float invM4;
+    float invM5;
+    float invM6;
+    float invM7;
+    float invM8;
+    int nightMode;
+} p;
+
+const float NEAR_W = 3.0;
+const float FAR_W = 3.0;
+const float NEAR_A = 0.8;
+const float FAR_A = 0.4;
+const float NEAR_FADE_SIDES_1 = 0.38;
+const float NEAR_FADE_SIDES_2 = 0.12;
+const float NEAR_FADE_CENTER_1 = 0.3;
+const float NEAR_FADE_CENTER_2 = 0.02;
+const float FAR_FADE_SIDES_1 = 0.35;
+const float FAR_FADE_SIDES_2 = 0.3;
+const float FAR_FADE_CENTER_1 = 0.08;
+const float FAR_FADE_CENTER_2 = 0.12;
+
+vec2 screenToRegion(vec2 screenPx) {
+    return vec2(
+        p.invM0 * screenPx.x + p.invM3 * screenPx.y + p.invM6,
+        p.invM1 * screenPx.x + p.invM4 * screenPx.y + p.invM7
+    );
+}
+
+float RBox(vec2 pos, vec2 halfSize, float corner) {
+    vec2 q = abs(pos) - halfSize + corner;
+    return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - corner;
+}
+
+float getDis(vec2 pos, vec2 halfSize) {
+    vec2 rect = abs(pos - halfSize);
+    return rect.x + rect.y;
+}
+
+vec3 getLineFadeTowardCenter(vec2 fade, float lineWidth) {
+    float x = clamp(fade.x, 0.0, 1.0);
+    float y = clamp(fade.y, 0.0, 1.0 - x);
+    float z = clamp(1.0 - x - y, 0.01, 1.0);
+    vec3 lineFade = lineWidth * vec3(x, y, z);
+    lineFade.y += lineFade.x;
+    lineFade.z += lineFade.y;
+    return lineFade * -1.0;
+}
+
+vec4 gradientStroke(vec2 fragCoord, vec2 rectSize, float corner, float ratio, vec3 rimColor) {
+    vec2 halfSize = rectSize * 0.5;
+    vec2 pos = fragCoord - rectSize * 0.5;
+    vec2 dirPos = normalize(pos);
+    vec2 dirAbs = abs(dirPos);
+    vec2 posN = min(
+        vec2(dirAbs.x * halfSize.y / max(0.001, dirAbs.y),
+             dirAbs.y * halfSize.x / max(0.001, dirAbs.x)),
+        halfSize) * sign(dirPos);
+    vec2 halfSymbol = vec2(-halfSize.y, halfSize.x);
+    float flag = mix(-1.0, 1.0, step(ratio, 0.5)) * dot(halfSymbol, posN);
+    float distanceAll = rectSize.x + rectSize.y;
+    float disPoint = distanceAll * min(ratio, 1.0 - ratio) * 2.0;
+    float disPos = getDis(posN, halfSize);
+    float distanceNear = mix(disPoint + disPos, abs(disPoint - disPos), step(0.0, flag));
+    distanceNear = min(2.0 * distanceAll - distanceNear, distanceNear);
+    vec2 nearFade = vec2(NEAR_FADE_SIDES_1, NEAR_FADE_SIDES_1 + NEAR_FADE_SIDES_2);
+    vec2 farFade = vec2(FAR_FADE_SIDES_1, FAR_FADE_SIDES_1 + FAR_FADE_SIDES_2);
+    float lineNearAlpha = NEAR_A * smoothstep(nearFade.y * distanceAll, nearFade.x * distanceAll, distanceNear);
+    float lineFarAlpha = FAR_A * smoothstep(farFade.y * distanceAll, farFade.x * distanceAll, distanceAll - distanceNear);
+    vec3 farFadeCenter = getLineFadeTowardCenter(vec2(FAR_FADE_CENTER_1, FAR_FADE_CENTER_2), FAR_W);
+    vec3 nearFadeCenter = getLineFadeTowardCenter(vec2(NEAR_FADE_CENTER_1, NEAR_FADE_CENTER_2), NEAR_W);
+    corner = min(corner, min(halfSize.x, halfSize.y));
+    float rectSdf = RBox(pos, halfSize, corner);
+    float lineNearSdf = smoothstep(0.0, nearFadeCenter.x, rectSdf)
+            - smoothstep(nearFadeCenter.y, nearFadeCenter.z, rectSdf);
+    float lineFarSdf = smoothstep(0.0, farFadeCenter.x, rectSdf)
+            - smoothstep(farFadeCenter.y, farFadeCenter.z, rectSdf);
+    lineNearAlpha *= lineNearSdf;
+    lineFarAlpha *= lineFarSdf;
+    float lineAlpha = clamp(lineNearAlpha + lineFarAlpha, 0.0, 1.0);
+    return vec4(rimColor * lineAlpha, lineAlpha);
+}
+
+vec3 overlayBlend(vec3 base, vec3 blend) {
+    return mix(2.0 * base * blend, vec3(1.0) - 2.0 * (vec3(1.0) - base) * (vec3(1.0) - blend), step(vec3(0.5), base));
+}
+
+void main() {
+    const ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= int(p.resX) || px.y >= int(p.resY)) {
+        return;
+    }
+
+    const vec2 center = vec2(p.rectL + p.rectR, p.rectT + p.rectB) * 0.5;
+    const vec2 halfSize = vec2(p.rectR - p.rectL, p.rectB - p.rectT) * 0.5;
+    const vec2 local = screenToRegion(vec2(px) + 0.5) - center;
+    const vec4 radii = vec4(p.radTL, p.radTR, p.radBR, p.radBL);
+
+    float corner = p.radTL;
+    if (local.x >= 0.0) {
+        corner = local.y >= 0.0 ? p.radBR : p.radTR;
+    } else {
+        corner = local.y >= 0.0 ? p.radBL : p.radTL;
+    }
+
+    const vec2 rectSize = halfSize * 2.0;
+    const vec2 fragCoord = local + halfSize;
+    const float ratio = ((rectSize.x * 1.5) + rectSize.y) / ((rectSize.y + rectSize.x) * 2.0);
+    const vec3 rimColor = p.nightMode != 0 ? vec3(0.8) : vec3(1.0);
+
+    const vec4 rim = gradientStroke(fragCoord, rectSize, corner, ratio, rimColor);
+    if (rim.a <= 0.0) {
+        return;
+    }
+
+    const vec4 cur = imageLoad(dst, px);
+    const vec3 blended = overlayBlend(cur.rgb, rim.rgb);
+    const vec3 outRgb = mix(cur.rgb, blended, rim.a);
+    imageStore(dst, px, vec4(outRgb, 1.0));
+}

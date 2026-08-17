@@ -1,6 +1,7 @@
 package com.vulkanfx.blur
 
 import android.content.Context
+import android.content.res.Configuration
 import android.content.pm.ApplicationInfo
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
@@ -102,6 +103,19 @@ class VulkanBlurView @JvmOverloads constructor(
             }
         }
 
+    /** Vulkan glass rim over each [BlurRegion]. */
+    var glassRimEnabled: Boolean = false
+        set(value) {
+            field = value
+            try {
+                blur.setGlassRimEnabled(value)
+                requestRender()
+            } catch (e: IllegalStateException) {
+                Log.e(TAG, "Vulkan setGlassRimEnabled failed", e)
+                onStatus?.invoke("VulkanBlur setGlassRimEnabled failed:\n${e.message}")
+            }
+        }
+
     /** 0 = final blur output; 1..N = downsample pyramid levels. */
     var debugLevel: Int = 0
         set(value) {
@@ -173,6 +187,10 @@ class VulkanBlurView @JvmOverloads constructor(
             blur.setBlurScale(blurScale)
             if (blurRegions.isNotEmpty()) blur.setBlurRegions(blurRegions)
             blur.setBlurRegionTransform(blurRegionTransform)
+            blur.setGlassRimEnabled(glassRimEnabled)
+            val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+                Configuration.UI_MODE_NIGHT_YES
+            blur.setGlassRimNightMode(night)
             blur.setDebugLevel(debugLevel)
             val info = blur.attach(surface, enableValidation = debug)
             onStatus?.invoke(info)

@@ -112,11 +112,23 @@ blur.detach()          // destroy Vulkan context
 | `setBlurScale(scale)` | Zoom around blur center (`backgroundBlurScale`). |
 | `setBlurRegions(regions)` | Rounded-rect blurred clips (`BlurRegion` list, AOSP `blurRegions`). |
 | `setBlurRegionTransform(matrix)` | 3×3 column-major affine before region draws (AOSP `blurRegionTransform`). |
+| `setGlassRimEnabled(enabled)` | Vulkan glass rim over each `BlurRegion`. |
 | `setDebugLevel(level)` | `0` = final output; `1..N` = downsample pyramid stage (debug). |
 | `render()` | Record Kawase passes + blit to swapchain + present. |
 | `resize(w, h)` | Swapchain recreate on surface size change. |
 | `info()` | Multi-line status string (device, timings, pyramid). |
 | `downsampleMs` / `upsampleMs` / `totalMs` | Last frame GPU timings (-1 if unsupported). |
+
+### Glass rim (Vulkan compute)
+
+Gradient stroke rim is rendered in the same Vulkan frame as blur (`glass_rim.comp`):
+
+```kotlin
+blurView.blurRegions = myRegions
+blurView.glassRimEnabled = true
+```
+
+Toggle off with `glassRimEnabled = false`. Night tint follows system UI mode automatically.
 
 ## Radius behaviour (AOSP parity)
 
