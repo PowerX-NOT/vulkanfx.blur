@@ -187,7 +187,7 @@ VulkanContext::~VulkanContext() {
         vkDeviceWaitIdle(device_);
     }
     blur_.destroy();
-    testImage_.destroy();
+    inputImage_.destroy();
     destroySwapchain();
     if (acquireSem_ != VK_NULL_HANDLE) vkDestroySemaphore(device_, acquireSem_, nullptr);
     if (presentSem_ != VK_NULL_HANDLE) vkDestroySemaphore(device_, presentSem_, nullptr);
@@ -468,38 +468,43 @@ void VulkanContext::barrierImage(VkCommandBuffer cmd, VkImage image,
     imageBarrier(cmd, cmdBarrier2_, image, srcStage, srcAccess, oldLayout, dstStage, dstAccess, newLayout);
 }
 
-bool VulkanContext::createTestTexture(uint32_t w, uint32_t h) {
-    return testImage_.create(
+bool VulkanContext::createInputImage(uint32_t w, uint32_t h) {
+    return inputImage_.create(
             device_, physical_, w, h, VK_FORMAT_R8G8B8A8_UNORM,
             VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &error_);
 }
 
-bool VulkanContext::ensureWorkingResources() {
-    const VkExtent2D work = workExtentFor(swapchainExtent_);
-    const bool sizeChanged = testImage_.image == VK_NULL_HANDLE ||
-                             testImage_.width != work.width || testImage_.height != work.height;
-    if (sizeChanged) {
-        if (!createTestTexture(work.width, work.height)) return false;
-        if (!uploadTestTexture()) return false;
-        if (blur_.passes() == 0) {
-            if (!blur_.create(device_, physical_, testImage_, radius_, queueFamily_, cmdBarrier2_, &error_)) {
-                return false;
-            }
-        } else if (!blur_.resize(testImage_, &error_)) {
+bool VulkanContext::rebuildBlurFromInput() {
+    if (blur_.passes() == 0) {
+        if (!blur_.create(device_, physical_, inputImage_, radius_, queueFamily_, cmdBarrier2_, &error_)) {
             return false;
         }
-        if (!blur_.execute(cmd_, queue_, &error_)) return false;
-    } else if (blur_.passes() == 0) {
-        if (!blur_.create(device_, physical_, testImage_, radius_, queueFamily_, cmdBarrier2_, &error_)) {
-            return false;
-        }
-        if (!blur_.execute(cmd_, queue_, &error_)) return false;
+    } else if (!blur_.resize(inputImage_, &error_)) {
+        return false;
     }
+    return blur_.execute(cmd_, queue_, &error_);
+}
+
+bool VulkanContext::ensureWorkingResources() {
+    if (!useChecker_) {
+        if (inputImage_.image == VK_NULL_HANDLE) return false;
+        if (blur_.passes() == 0) return rebuildBlurFromInput();
+        return true;
+    }
+    const VkExtent2D work = workExtentFor(swapchainExtent_);
+    const bool sizeChanged = inputImage_.image == VK_NULL_HANDLE ||
+                             inputImage_.width != work.width || inputImage_.height != work.height;
+    if (sizeChanged) {
+        if (!createInputImage(work.width, work.height)) return false;
+        if (!uploadChecker()) return false;
+        return rebuildBlurFromInput();
+    }
+    if (blur_.passes() == 0) return rebuildBlurFromInput();
     return true;
 }
 
-bool VulkanContext::uploadTestTexture() {
-    const VkDeviceSize bytes = static_cast<VkDeviceSize>(testImage_.width) * testImage_.height * 4;
+bool VulkanContext::uploadInputRgba(const uint8_t* rgba) {
+    const VkDeviceSize bytes = static_cast<VkDeviceSize>(inputImage_.width) * inputImage_.height * 4;
     VulkanBuffer staging;
     if (!staging.create(device_, physical_, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &error_)) {
@@ -510,23 +515,7 @@ bool VulkanContext::uploadTestTexture() {
         staging.destroy();
         return false;
     }
-    for (uint32_t y = 0; y < testImage_.height; ++y) {
-        for (uint32_t x = 0; x < testImage_.width; ++x) {
-            const bool on = ((x / kTestCell) + (y / kTestCell)) % 2 == 0;
-            uint8_t* p = pixels + (static_cast<size_t>(y) * testImage_.width + x) * 4;
-            if (on) {
-                p[0] = 255;
-                p[1] = 64;
-                p[2] = 160;
-                p[3] = 255;
-            } else {
-                p[0] = 32;
-                p[1] = 200;
-                p[2] = 220;
-                p[3] = 255;
-            }
-        }
-    }
+    std::memcpy(pixels, rgba, static_cast<size_t>(bytes));
     staging.unmap();
 
     VkCommandBufferBeginInfo begin{};
@@ -534,22 +523,17 @@ bool VulkanContext::uploadTestTexture() {
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     VK_TRY(vkBeginCommandBuffer(cmd_, &begin));
 
-    // First use of the test image: discard UNDEFINED, make it a copy destination.
-    // src NONE: no prior GPU work. dst COPY+TRANSFER_WRITE: vkCmdCopyBufferToImage writes.
-    barrierImage(cmd_, testImage_.image,
+    barrierImage(cmd_, inputImage_.image,
                  VK_PIPELINE_STAGE_2_NONE, 0, VK_IMAGE_LAYOUT_UNDEFINED,
                  VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
     VkBufferImageCopy region{};
     region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     region.imageSubresource.layerCount = 1;
-    region.imageExtent = {testImage_.width, testImage_.height, 1};
-    vkCmdCopyBufferToImage(cmd_, staging.buffer, testImage_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    region.imageExtent = {inputImage_.width, inputImage_.height, 1};
+    vkCmdCopyBufferToImage(cmd_, staging.buffer, inputImage_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-    // Upload finished. Next pass samples this image with a linear sampler.
-    // src COPY+TRANSFER_WRITE: the copy above.
-    // dst COMPUTE+SHADER_SAMPLED_READ: textureLod in kawase_down.comp.
-    barrierImage(cmd_, testImage_.image,
+    barrierImage(cmd_, inputImage_.image,
                  VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -565,6 +549,48 @@ bool VulkanContext::uploadTestTexture() {
     staging.destroy();
     vkResetCommandBuffer(cmd_, 0);
     return true;
+}
+
+bool VulkanContext::uploadChecker() {
+    const VkDeviceSize bytes = static_cast<VkDeviceSize>(inputImage_.width) * inputImage_.height * 4;
+    std::vector<uint8_t> rgba(static_cast<size_t>(bytes));
+    for (uint32_t y = 0; y < inputImage_.height; ++y) {
+        for (uint32_t x = 0; x < inputImage_.width; ++x) {
+            const bool on = ((x / kTestCell) + (y / kTestCell)) % 2 == 0;
+            uint8_t* p = rgba.data() + (static_cast<size_t>(y) * inputImage_.width + x) * 4;
+            if (on) {
+                p[0] = 255;
+                p[1] = 64;
+                p[2] = 160;
+                p[3] = 255;
+            } else {
+                p[0] = 32;
+                p[1] = 200;
+                p[2] = 220;
+                p[3] = 255;
+            }
+        }
+    }
+    return uploadInputRgba(rgba.data());
+}
+
+bool VulkanContext::setInputRgba(const uint8_t* rgba, uint32_t width, uint32_t height) {
+    if (!rgba || width == 0 || height == 0) {
+        error_ = "setInputRgba: empty input";
+        return false;
+    }
+    // Cap like swapchain work size so huge bitmaps don't OOM staging.
+    VkExtent2D capped = workExtentFor({width, height});
+    if (capped.width != width || capped.height != height) {
+        error_ = "setInputRgba: max edge " + std::to_string(kMaxWorkEdge);
+        return false;
+    }
+    vkDeviceWaitIdle(device_);
+    useChecker_ = false;
+    if (!createInputImage(width, height)) return false;
+    if (!uploadInputRgba(rgba)) return false;
+    if (!rebuildBlurFromInput()) return false;
+    return presentTest();
 }
 
 bool VulkanContext::createSwapchain() {
@@ -819,11 +845,11 @@ bool VulkanContext::setSurface(ANativeWindow* window) {
 bool VulkanContext::setRadius(float radius) {
     radius_ = radius;
     if (radius == blur_.radius() && blur_.passes() > 0) return true;
-    if (testImage_.image == VK_NULL_HANDLE) {
+    if (inputImage_.image == VK_NULL_HANDLE) {
         return true;  // applied on next ensureWorkingResources / surface
     }
     vkDeviceWaitIdle(device_);
-    if (!blur_.setRadius(radius, testImage_, &error_)) return false;
+    if (!blur_.setRadius(radius, inputImage_, &error_)) return false;
     if (!blur_.execute(cmd_, queue_, &error_)) return false;
     return presentTest();
 }
@@ -834,7 +860,7 @@ bool VulkanContext::setDebugLevel(int level) {
 }
 
 bool VulkanContext::render() {
-    if (testImage_.image == VK_NULL_HANDLE || blur_.passes() == 0) {
+    if (inputImage_.image == VK_NULL_HANDLE || blur_.passes() == 0) {
         error_ = "render before working resources";
         return false;
     }
@@ -901,11 +927,11 @@ std::string VulkanContext::info() const {
     s += " ";
     s += presentModeName(presentMode_);
     s += "\n";
-    s += "testImage=";
-    s += std::to_string(testImage_.width);
+    s += "input=";
+    s += std::to_string(inputImage_.width);
     s += "x";
-    s += std::to_string(testImage_.height);
-    s += " R8G8B8A8_UNORM checker\n";
+    s += std::to_string(inputImage_.height);
+    s += useChecker_ ? " R8G8B8A8 checker\n" : " R8G8B8A8 bitmap\n";
     s += "radius=";
     s += std::to_string(blur_.radius());
     s += "\n";

@@ -21,10 +21,12 @@ target_compile_options(vulkanblur PRIVATE -Wall -Wextra -fno-exceptions -fno-rtt
 find_library(log-lib log)
 find_library(android-lib android)
 find_library(vulkan-lib vulkan)
+find_library(jnigraphics-lib jnigraphics)
 target_link_libraries(vulkanblur PRIVATE
     ${log-lib}
     ${android-lib}
     ${vulkan-lib}
+    ${jnigraphics-lib}
 )
 
 set(_glslc "${ANDROID_NDK}/shader-tools/${ANDROID_NDK_HOST_SYSTEM_NAME}/glslc")

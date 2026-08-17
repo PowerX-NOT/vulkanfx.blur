@@ -20,6 +20,7 @@ public:
     bool resize(uint32_t width, uint32_t height);
     bool setRadius(float radius);
     bool setDebugLevel(int level);
+    bool setInputRgba(const uint8_t* rgba, uint32_t width, uint32_t height);
     bool render();
     void releaseSurface();
     bool setSurface(ANativeWindow* window);
@@ -41,8 +42,10 @@ private:
     bool createSyncObjects();
     bool createSwapchain();
     void destroySwapchain();
-    bool createTestTexture(uint32_t w, uint32_t h);
-    bool uploadTestTexture();
+    bool createInputImage(uint32_t w, uint32_t h);
+    bool uploadInputRgba(const uint8_t* rgba);
+    bool uploadChecker();
+    bool rebuildBlurFromInput();
     bool ensureWorkingResources();
     bool presentTest();
     void barrierImage(VkCommandBuffer cmd, VkImage image,
@@ -68,9 +71,10 @@ private:
     VkPresentModeKHR presentMode_ = VK_PRESENT_MODE_FIFO_KHR;
     VkExtent2D swapchainExtent_{};
     std::vector<VkImage> swapchainImages_;
-    VulkanImage testImage_;
+    VulkanImage inputImage_;
     KawaseBlur blur_;
     float radius_ = 24.0f;
+    bool useChecker_ = true;
     PFN_vkCmdPipelineBarrier2 cmdBarrier2_ = nullptr;
     VkPhysicalDeviceProperties props_{};
     uint32_t instanceApi_ = VK_API_VERSION_1_1;

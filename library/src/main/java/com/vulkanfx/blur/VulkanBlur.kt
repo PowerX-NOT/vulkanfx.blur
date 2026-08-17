@@ -1,16 +1,18 @@
 package com.vulkanfx.blur
 
+import android.graphics.Bitmap
 import android.view.Surface
 
 /**
  * Kotlin entry point for the Vulkan Dual Kawase blur engine.
  *
  * Typical SurfaceView host:
- *   attach(surface) → setBlurRadius / resize → render() as needed → detach()
+ *   attach(surface) → setInputBitmap / setBlurRadius → render() → detach()
  */
 class VulkanBlur {
     private var handle: Long = 0
     private var pendingRadius: Float = 24f
+    private var pendingBitmap: Bitmap? = null
 
     @Synchronized
     fun attach(surface: Surface, enableValidation: Boolean = false): String {
@@ -20,6 +22,10 @@ class VulkanBlur {
             handle = nativeCreate(surface, enableValidation)
         }
         nativeSetRadius(handle, pendingRadius)
+        pendingBitmap?.let {
+            nativeSetInputBitmap(handle, it)
+            pendingBitmap = null
+        }
         return nativeInfo(handle)
     }
 
@@ -45,6 +51,17 @@ class VulkanBlur {
     @Synchronized
     fun setDebugLevel(level: Int) {
         if (handle != 0L) nativeSetDebugLevel(handle, level.coerceAtLeast(0))
+    }
+
+    /** Upload RGBA content to blur. Must be [Bitmap.Config.ARGB_8888], max edge 1280. */
+    @Synchronized
+    fun setInputBitmap(bitmap: Bitmap) {
+        require(bitmap.config == Bitmap.Config.ARGB_8888) { "ARGB_8888 required" }
+        if (handle == 0L) {
+            pendingBitmap = bitmap
+            return
+        }
+        nativeSetInputBitmap(handle, bitmap)
     }
 
     /** Re-run Dual Kawase + present. No-op until [attach] has succeeded. */
@@ -75,6 +92,7 @@ class VulkanBlur {
             nativeDestroy(handle)
             handle = 0L
         }
+        pendingBitmap = null
     }
 
     @get:Synchronized
@@ -87,6 +105,7 @@ class VulkanBlur {
     private external fun nativeResize(handle: Long, width: Int, height: Int)
     private external fun nativeSetRadius(handle: Long, radius: Float)
     private external fun nativeSetDebugLevel(handle: Long, level: Int)
+    private external fun nativeSetInputBitmap(handle: Long, bitmap: Bitmap)
     private external fun nativeRender(handle: Long)
     private external fun nativeInfo(handle: Long): String
     private external fun nativeDownMs(handle: Long): Float

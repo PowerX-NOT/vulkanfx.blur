@@ -2,9 +2,11 @@ package com.vulkanfx.blur
 
 import android.content.Context
 import android.content.pm.ApplicationInfo
+import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.util.AttributeSet
 import android.util.Log
+import android.view.Choreographer
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 
@@ -25,7 +27,7 @@ class VulkanBlurView @JvmOverloads constructor(
             field = value.coerceAtLeast(1f)
             try {
                 blur.setBlurRadius(field)
-                if (blur.isReady) onStatus?.invoke(blur.info())
+                requestRender()
             } catch (e: IllegalStateException) {
                 Log.e(TAG, "Vulkan setRadius failed", e)
                 onStatus?.invoke("VulkanBlur setRadius failed:\n${e.message}")
@@ -38,7 +40,7 @@ class VulkanBlurView @JvmOverloads constructor(
             field = value.coerceAtLeast(0)
             try {
                 blur.setDebugLevel(field)
-                if (blur.isReady) onStatus?.invoke(blur.info())
+                requestRender()
             } catch (e: IllegalStateException) {
                 Log.e(TAG, "Vulkan setDebugLevel failed", e)
                 onStatus?.invoke("VulkanBlur setDebugLevel failed:\n${e.message}")
@@ -46,6 +48,18 @@ class VulkanBlurView @JvmOverloads constructor(
         }
 
     private val blur = VulkanBlur()
+    private var frameScheduled = false
+    private val frameCallback = Choreographer.FrameCallback {
+        frameScheduled = false
+        if (!blur.isReady) return@FrameCallback
+        try {
+            blur.render()
+            onStatus?.invoke(blur.info())
+        } catch (e: IllegalStateException) {
+            Log.e(TAG, "Vulkan render failed", e)
+            onStatus?.invoke("VulkanBlur render failed:\n${e.message}")
+        }
+    }
 
     init {
         holder.setFormat(PixelFormat.RGBA_8888)
@@ -57,6 +71,25 @@ class VulkanBlurView @JvmOverloads constructor(
         this.blurRadius = blurRadius
     }
 
+    fun setInputBitmap(bitmap: Bitmap) {
+        try {
+            blur.setInputBitmap(bitmap)
+            requestRender()
+        } catch (e: IllegalStateException) {
+            Log.e(TAG, "Vulkan setInputBitmap failed", e)
+            onStatus?.invoke("VulkanBlur setInputBitmap failed:\n${e.message}")
+        } catch (e: IllegalArgumentException) {
+            Log.e(TAG, "Vulkan setInputBitmap bad bitmap", e)
+            onStatus?.invoke("VulkanBlur setInputBitmap failed:\n${e.message}")
+        }
+    }
+
+    fun requestRender() {
+        if (frameScheduled || !blur.isReady) return
+        frameScheduled = true
+        Choreographer.getInstance().postFrameCallback(frameCallback)
+    }
+
     override fun surfaceCreated(holder: SurfaceHolder) {
         val surface = holder.surface
         if (surface == null || !surface.isValid) {
@@ -66,8 +99,10 @@ class VulkanBlurView @JvmOverloads constructor(
         try {
             val debug = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
             blur.setBlurRadius(blurRadius)
+            blur.setDebugLevel(debugLevel)
             val info = blur.attach(surface, enableValidation = debug)
             onStatus?.invoke(info)
+            requestRender()
         } catch (e: IllegalStateException) {
             Log.e(TAG, "Vulkan init failed", e)
             onStatus?.invoke("VulkanBlur init failed:\n${e.message}")
@@ -79,7 +114,7 @@ class VulkanBlurView @JvmOverloads constructor(
         if (!blur.isReady) return
         try {
             blur.resize(width, height)
-            onStatus?.invoke(blur.info())
+            requestRender()
         } catch (e: IllegalStateException) {
             Log.e(TAG, "Vulkan resize failed", e)
             onStatus?.invoke("VulkanBlur resize failed:\n${e.message}")
@@ -87,10 +122,14 @@ class VulkanBlurView @JvmOverloads constructor(
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
+        Choreographer.getInstance().removeFrameCallback(frameCallback)
+        frameScheduled = false
         blur.releaseSurface()
     }
 
     override fun onDetachedFromWindow() {
+        Choreographer.getInstance().removeFrameCallback(frameCallback)
+        frameScheduled = false
         blur.detach()
         super.onDetachedFromWindow()
     }

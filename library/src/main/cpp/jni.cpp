@@ -1,5 +1,6 @@
 #include "VulkanContext.h"
 
+#include <android/bitmap.h>
 #include <android/native_window_jni.h>
 #include <jni.h>
 
@@ -91,6 +92,38 @@ Java_com_vulkanfx_blur_VulkanBlur_nativeSetDebugLevel(JNIEnv* env, jobject, jlon
     }
     if (!ctx->setDebugLevel(level)) {
         throwState(env, ctx->lastError().empty() ? "setDebugLevel failed" : ctx->lastError().c_str());
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_vulkanfx_blur_VulkanBlur_nativeSetInputBitmap(JNIEnv* env, jobject, jlong handle, jobject bitmap) {
+    VulkanContext* ctx = fromHandle(handle);
+    if (!ctx) {
+        throwState(env, "native handle is null");
+        return;
+    }
+    if (!bitmap) {
+        throwState(env, "bitmap is null");
+        return;
+    }
+    AndroidBitmapInfo info{};
+    if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) {
+        throwState(env, "AndroidBitmap_getInfo failed");
+        return;
+    }
+    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
+        throwState(env, "bitmap must be ARGB_8888 / RGBA_8888");
+        return;
+    }
+    void* pixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS || !pixels) {
+        throwState(env, "AndroidBitmap_lockPixels failed");
+        return;
+    }
+    const bool ok = ctx->setInputRgba(static_cast<const uint8_t*>(pixels), info.width, info.height);
+    AndroidBitmap_unlockPixels(env, bitmap);
+    if (!ok) {
+        throwState(env, ctx->lastError().empty() ? "setInputRgba failed" : ctx->lastError().c_str());
     }
 }
 
