@@ -7,13 +7,6 @@
 #include <cstring>
 #include <vector>
 
-static const uint32_t kDownSpv[] =
-#include "kawase_down_comp_spv.inc"
-;
-static const uint32_t kUpSpv[] =
-#include "kawase_up_comp_spv.inc"
-;
-
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "VulkanBlur", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "VulkanBlur", __VA_ARGS__)
 
@@ -101,48 +94,10 @@ const char* presentModeName(VkPresentModeKHR m) {
     }
 }
 
-VkPipelineStageFlags mapStage1(VkPipelineStageFlags2 s, bool isSrc) {
-    if (s == VK_PIPELINE_STAGE_2_NONE) {
-        return isSrc ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-    }
-    VkPipelineStageFlags out = 0;
-    if (s & (VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_BLIT_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT)) {
-        out |= VK_PIPELINE_STAGE_TRANSFER_BIT;
-    }
-    if (s & VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT) out |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-    if (s & VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) out |= VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-    if (!out) {
-        return isSrc ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-    }
-    return out;
-}
-
-VkAccessFlags mapAccess1(VkAccessFlags2 a) {
-    VkAccessFlags out = 0;
-    if (a & VK_ACCESS_2_TRANSFER_READ_BIT) out |= VK_ACCESS_TRANSFER_READ_BIT;
-    if (a & VK_ACCESS_2_TRANSFER_WRITE_BIT) out |= VK_ACCESS_TRANSFER_WRITE_BIT;
-    if (a & (VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
-             VK_ACCESS_2_SHADER_SAMPLED_READ_BIT)) {
-        out |= VK_ACCESS_SHADER_READ_BIT;
-    }
-    if (a & (VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)) {
-        out |= VK_ACCESS_SHADER_WRITE_BIT;
-    }
-    return out;
-}
-
 constexpr uint32_t kTestSize = 256;
 constexpr uint32_t kTestCell = 32;
 constexpr uint32_t kDownPasses = 3;
 constexpr float kDownOffset = 1.0f;
-
-struct KawasePush {
-    float texelX, texelY;
-    float offset;
-    float intensity;
-    float resX, resY;
-};
-static_assert(sizeof(KawasePush) == 24, "push constant layout");
 
 std::vector<VkLayerProperties> instanceLayers() {
     uint32_t n = 0;
@@ -219,11 +174,7 @@ VulkanContext::~VulkanContext() {
     if (device_ != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_);
     }
-    destroyDownPipeline();
-    for (auto& img : upImages_) img.destroy();
-    upImages_.clear();
-    for (auto& img : downImages_) img.destroy();
-    downImages_.clear();
+    blur_.destroy();
     testImage_.destroy();
     destroySwapchain();
     if (acquireSem_ != VK_NULL_HANDLE) vkDestroySemaphore(device_, acquireSem_, nullptr);
@@ -261,10 +212,11 @@ bool VulkanContext::init(ANativeWindow* window, bool enableValidation) {
     if (!createCommandPool()) return false;
     if (!createSyncObjects()) return false;
     if (!createTestTexture()) return false;
-    if (!createDownPipeline()) return false;
-    if (!createUpPipeline()) return false;
     if (!uploadTestTexture()) return false;
-    if (!dispatchDown()) return false;
+    if (!blur_.create(device_, physical_, testImage_, kDownPasses, kDownOffset, cmdBarrier2_, &error_)) {
+        return false;
+    }
+    if (!blur_.execute(cmd_, queue_, &error_)) return false;
     if (!createSwapchain()) return false;
     if (swapchainExtent_.width > 0 && swapchainExtent_.height > 0) {
         if (!presentTest()) return false;
@@ -501,41 +453,7 @@ bool VulkanContext::createSyncObjects() {
 void VulkanContext::barrierImage(VkCommandBuffer cmd, VkImage image,
                                  VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess, VkImageLayout oldLayout,
                                  VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess, VkImageLayout newLayout) {
-    if (cmdBarrier2_) {
-        VkImageMemoryBarrier2 b{};
-        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-        b.srcStageMask = srcStage;
-        b.srcAccessMask = srcAccess;
-        b.dstStageMask = dstStage;
-        b.dstAccessMask = dstAccess;
-        b.oldLayout = oldLayout;
-        b.newLayout = newLayout;
-        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        b.image = image;
-        b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        b.subresourceRange.levelCount = 1;
-        b.subresourceRange.layerCount = 1;
-        VkDependencyInfo dep{};
-        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-        dep.imageMemoryBarrierCount = 1;
-        dep.pImageMemoryBarriers = &b;
-        cmdBarrier2_(cmd, &dep);
-        return;
-    }
-    VkImageMemoryBarrier b{};
-    b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b.srcAccessMask = mapAccess1(srcAccess);
-    b.dstAccessMask = mapAccess1(dstAccess);
-    b.oldLayout = oldLayout;
-    b.newLayout = newLayout;
-    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.image = image;
-    b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    b.subresourceRange.levelCount = 1;
-    b.subresourceRange.layerCount = 1;
-    vkCmdPipelineBarrier(cmd, mapStage1(srcStage, true), mapStage1(dstStage, false), 0, 0, nullptr, 0, nullptr, 1, &b);
+    imageBarrier(cmd, cmdBarrier2_, image, srcStage, srcAccess, oldLayout, dstStage, dstAccess, newLayout);
 }
 
 bool VulkanContext::createTestTexture() {
@@ -608,313 +526,6 @@ bool VulkanContext::uploadTestTexture() {
     VK_TRY(vkQueueSubmit(queue_, 1, &submit, VK_NULL_HANDLE));
     VK_TRY(vkQueueWaitIdle(queue_));
     staging.destroy();
-    vkResetCommandBuffer(cmd_, 0);
-    return true;
-}
-
-bool VulkanContext::createDownPipeline() {
-    VkFormatProperties fmt{};
-    vkGetPhysicalDeviceFormatProperties(physical_, VK_FORMAT_R8G8B8A8_UNORM, &fmt);
-    if ((fmt.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) == 0) {
-        error_ = "R8G8B8A8_UNORM lacks linear sampled image";
-        LOGE("%s", error_.c_str());
-        return false;
-    }
-    if ((fmt.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) == 0) {
-        error_ = "R8G8B8A8_UNORM lacks STORAGE_IMAGE";
-        LOGE("%s", error_.c_str());
-        return false;
-    }
-    if (!downImages_.empty()) {
-        for (auto& img : downImages_) img.destroy();
-        downImages_.clear();
-    }
-    downImages_.resize(kDownPasses);
-    uint32_t w = kTestSize;
-    uint32_t h = kTestSize;
-    for (uint32_t i = 0; i < kDownPasses; ++i) {
-        w = std::max(1u, w / 2);
-        h = std::max(1u, h / 2);
-        if (!downImages_[i].create(device_, physical_, w, h, VK_FORMAT_R8G8B8A8_UNORM,
-                                   VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                                           VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-                                   &error_)) {
-            return false;
-        }
-    }
-
-    VkSamplerCreateInfo sci{};
-    sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    sci.magFilter = VK_FILTER_LINEAR;
-    sci.minFilter = VK_FILTER_LINEAR;
-    sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    sci.maxLod = 0.0f;
-    VK_TRY(vkCreateSampler(device_, &sci, nullptr, &sampler_));
-
-    VkDescriptorSetLayoutBinding binds[2]{};
-    binds[0].binding = 0;
-    binds[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    binds[0].descriptorCount = 1;
-    binds[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    binds[1].binding = 1;
-    binds[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    binds[1].descriptorCount = 1;
-    binds[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    VkDescriptorSetLayoutCreateInfo sl{};
-    sl.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    sl.bindingCount = 2;
-    sl.pBindings = binds;
-    VK_TRY(vkCreateDescriptorSetLayout(device_, &sl, nullptr, &downSetLayout_));
-
-    VkPushConstantRange pc{};
-    pc.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pc.offset = 0;
-    pc.size = sizeof(KawasePush);
-    VkPipelineLayoutCreateInfo pl{};
-    pl.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pl.setLayoutCount = 1;
-    pl.pSetLayouts = &downSetLayout_;
-    pl.pushConstantRangeCount = 1;
-    pl.pPushConstantRanges = &pc;
-    VK_TRY(vkCreatePipelineLayout(device_, &pl, nullptr, &downPipelineLayout_));
-
-    VkShaderModuleCreateInfo sm{};
-    sm.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    sm.codeSize = sizeof(kDownSpv);
-    sm.pCode = kDownSpv;
-    VkShaderModule module = VK_NULL_HANDLE;
-    VK_TRY(vkCreateShaderModule(device_, &sm, nullptr, &module));
-
-    VkPipelineShaderStageCreateInfo stage{};
-    stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    stage.module = module;
-    stage.pName = "main";
-    VkComputePipelineCreateInfo ci{};
-    ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    ci.stage = stage;
-    ci.layout = downPipelineLayout_;
-    VkResult pipe = vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &ci, nullptr, &downPipeline_);
-    vkDestroyShaderModule(device_, module, nullptr);
-    if (pipe != VK_SUCCESS) {
-        error_ = std::string("vkCreateComputePipelines -> ") + vkResultName(pipe);
-        LOGE("%s", error_.c_str());
-        return false;
-    }
-
-    VkDescriptorPoolSize poolSizes[2]{};
-    poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[0].descriptorCount = kDownPasses * 2;
-    poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    poolSizes[1].descriptorCount = kDownPasses * 2;
-    VkDescriptorPoolCreateInfo pool{};
-    pool.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool.maxSets = kDownPasses * 2;
-    pool.poolSizeCount = 2;
-    pool.pPoolSizes = poolSizes;
-    VK_TRY(vkCreateDescriptorPool(device_, &pool, nullptr, &downDescPool_));
-
-    std::vector<VkDescriptorSetLayout> layouts(kDownPasses, downSetLayout_);
-    VkDescriptorSetAllocateInfo alloc{};
-    alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    alloc.descriptorPool = downDescPool_;
-    alloc.descriptorSetCount = kDownPasses;
-    alloc.pSetLayouts = layouts.data();
-    downDescSets_.resize(kDownPasses);
-    VK_TRY(vkAllocateDescriptorSets(device_, &alloc, downDescSets_.data()));
-
-    for (uint32_t i = 0; i < kDownPasses; ++i) {
-        const VulkanImage& src = (i == 0) ? testImage_ : downImages_[i - 1];
-        writeKawaseSet(downDescSets_[i], src.view, downImages_[i].view);
-    }
-    return true;
-}
-
-void VulkanContext::writeKawaseSet(VkDescriptorSet set, VkImageView src, VkImageView dst) {
-    VkDescriptorImageInfo images[2]{};
-    images[0].sampler = sampler_;
-    images[0].imageView = src;
-    images[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    images[1].imageView = dst;
-    images[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    VkWriteDescriptorSet writes[2]{};
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = set;
-    writes[0].dstBinding = 0;
-    writes[0].descriptorCount = 1;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[0].pImageInfo = &images[0];
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = set;
-    writes[1].dstBinding = 1;
-    writes[1].descriptorCount = 1;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    writes[1].pImageInfo = &images[1];
-    vkUpdateDescriptorSets(device_, 2, writes, 0, nullptr);
-}
-
-bool VulkanContext::createUpPipeline() {
-    if (!upImages_.empty()) {
-        for (auto& img : upImages_) img.destroy();
-        upImages_.clear();
-    }
-    upImages_.resize(kDownPasses);
-    uint32_t w = downImages_.back().width;
-    uint32_t h = downImages_.back().height;
-    for (uint32_t i = 0; i < kDownPasses; ++i) {
-        w *= 2;
-        h *= 2;
-        if (!upImages_[i].create(device_, physical_, w, h, VK_FORMAT_R8G8B8A8_UNORM,
-                                 VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                                         VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-                                 &error_)) {
-            return false;
-        }
-    }
-
-    VkShaderModuleCreateInfo sm{};
-    sm.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    sm.codeSize = sizeof(kUpSpv);
-    sm.pCode = kUpSpv;
-    VkShaderModule module = VK_NULL_HANDLE;
-    VK_TRY(vkCreateShaderModule(device_, &sm, nullptr, &module));
-    VkPipelineShaderStageCreateInfo stage{};
-    stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    stage.module = module;
-    stage.pName = "main";
-    VkComputePipelineCreateInfo ci{};
-    ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    ci.stage = stage;
-    ci.layout = downPipelineLayout_;
-    VkResult pipe = vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &ci, nullptr, &upPipeline_);
-    vkDestroyShaderModule(device_, module, nullptr);
-    if (pipe != VK_SUCCESS) {
-        error_ = std::string("vkCreateComputePipelines(up) -> ") + vkResultName(pipe);
-        LOGE("%s", error_.c_str());
-        return false;
-    }
-
-    std::vector<VkDescriptorSetLayout> layouts(kDownPasses, downSetLayout_);
-    VkDescriptorSetAllocateInfo alloc{};
-    alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    alloc.descriptorPool = downDescPool_;
-    alloc.descriptorSetCount = kDownPasses;
-    alloc.pSetLayouts = layouts.data();
-    upDescSets_.resize(kDownPasses);
-    VK_TRY(vkAllocateDescriptorSets(device_, &alloc, upDescSets_.data()));
-
-    for (uint32_t i = 0; i < kDownPasses; ++i) {
-        const VulkanImage& src = (i == 0) ? downImages_.back() : upImages_[i - 1];
-        writeKawaseSet(upDescSets_[i], src.view, upImages_[i].view);
-    }
-    return true;
-}
-
-void VulkanContext::destroyDownPipeline() {
-    if (device_ == VK_NULL_HANDLE) return;
-    if (upPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, upPipeline_, nullptr);
-    if (downPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, downPipeline_, nullptr);
-    if (downPipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device_, downPipelineLayout_, nullptr);
-    if (downDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(device_, downDescPool_, nullptr);
-    if (downSetLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device_, downSetLayout_, nullptr);
-    if (sampler_ != VK_NULL_HANDLE) vkDestroySampler(device_, sampler_, nullptr);
-    downPipeline_ = VK_NULL_HANDLE;
-    upPipeline_ = VK_NULL_HANDLE;
-    downPipelineLayout_ = VK_NULL_HANDLE;
-    downDescPool_ = VK_NULL_HANDLE;
-    downDescSets_.clear();
-    upDescSets_.clear();
-    downSetLayout_ = VK_NULL_HANDLE;
-    sampler_ = VK_NULL_HANDLE;
-}
-
-bool VulkanContext::dispatchDown() {
-    VkCommandBufferBeginInfo begin{};
-    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    VK_TRY(vkBeginCommandBuffer(cmd_, &begin));
-
-    vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, downPipeline_);
-    for (uint32_t i = 0; i < kDownPasses; ++i) {
-        const VulkanImage& src = (i == 0) ? testImage_ : downImages_[i - 1];
-        VulkanImage& dst = downImages_[i];
-
-        // First use of this level: discard UNDEFINED, storage write.
-        barrierImage(cmd_, dst.image,
-                     VK_PIPELINE_STAGE_2_NONE, 0, VK_IMAGE_LAYOUT_UNDEFINED,
-                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                     VK_IMAGE_LAYOUT_GENERAL);
-
-        vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, downPipelineLayout_, 0, 1,
-                                &downDescSets_[i], 0, nullptr);
-        KawasePush push{};
-        push.texelX = 1.0f / static_cast<float>(src.width);
-        push.texelY = 1.0f / static_cast<float>(src.height);
-        push.offset = kDownOffset;
-        push.intensity = 1.0f;
-        push.resX = static_cast<float>(dst.width);
-        push.resY = static_cast<float>(dst.height);
-        vkCmdPushConstants(cmd_, downPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-        vkCmdDispatch(cmd_, (dst.width + 15u) / 16u, (dst.height + 15u) / 16u, 1);
-
-        // Every down level is sampled by the next down or the first upsample.
-        barrierImage(cmd_, dst.image,
-                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                     VK_IMAGE_LAYOUT_GENERAL,
-                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        LOGI("kawase down[%u] %ux%u -> %ux%u", i, src.width, src.height, dst.width, dst.height);
-    }
-
-    vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, upPipeline_);
-    for (uint32_t i = 0; i < kDownPasses; ++i) {
-        const VulkanImage& src = (i == 0) ? downImages_.back() : upImages_[i - 1];
-        VulkanImage& dst = upImages_[i];
-
-        barrierImage(cmd_, dst.image,
-                     VK_PIPELINE_STAGE_2_NONE, 0, VK_IMAGE_LAYOUT_UNDEFINED,
-                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                     VK_IMAGE_LAYOUT_GENERAL);
-
-        vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, downPipelineLayout_, 0, 1,
-                                &upDescSets_[i], 0, nullptr);
-        KawasePush push{};
-        push.texelX = 1.0f / static_cast<float>(src.width);
-        push.texelY = 1.0f / static_cast<float>(src.height);
-        push.offset = kDownOffset;
-        push.intensity = 1.0f;
-        push.resX = static_cast<float>(dst.width);
-        push.resY = static_cast<float>(dst.height);
-        vkCmdPushConstants(cmd_, downPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-        vkCmdDispatch(cmd_, (dst.width + 15u) / 16u, (dst.height + 15u) / 16u, 1);
-
-        if (i + 1 < kDownPasses) {
-            barrierImage(cmd_, dst.image,
-                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                         VK_IMAGE_LAYOUT_GENERAL,
-                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        } else {
-            barrierImage(cmd_, dst.image,
-                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                         VK_IMAGE_LAYOUT_GENERAL,
-                         VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
-                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-        }
-        LOGI("kawase up[%u] %ux%u -> %ux%u", i, src.width, src.height, dst.width, dst.height);
-    }
-
-    VK_TRY(vkEndCommandBuffer(cmd_));
-    VkSubmitInfo submit{};
-    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &cmd_;
-    VK_TRY(vkQueueSubmit(queue_, 1, &submit, VK_NULL_HANDLE));
-    VK_TRY(vkQueueWaitIdle(queue_));
     vkResetCommandBuffer(cmd_, 0);
     return true;
 }
@@ -1068,7 +679,7 @@ bool VulkanContext::presentTest() {
         VkImageBlit blit{};
         blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         blit.srcSubresource.layerCount = 1;
-        const VulkanImage& src = upImages_.back();
+        const VulkanImage& src = blur_.output();
         blit.srcOffsets[1] = {static_cast<int32_t>(src.width), static_cast<int32_t>(src.height), 1};
         blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         blit.dstSubresource.layerCount = 1;
@@ -1140,8 +751,8 @@ std::string VulkanContext::info() const {
     const bool timestamps = props_.limits.timestampComputeAndGraphics == VK_TRUE &&
                             props_.limits.timestampPeriod > 0.0f;
     std::string s;
-    s += "VulkanBlur Phase 6\n";
-    s += "status=kawase-up\n";
+    s += "VulkanBlur Phase 7\n";
+    s += "status=dual-kawase\n";
     s += "device=";
     s += props_.deviceName;
     s += "\n";
@@ -1190,21 +801,7 @@ std::string VulkanContext::info() const {
     s += std::to_string(testImage_.height);
     s += " R8G8B8A8_UNORM checker\n";
     s += "pyramid=";
-    s += std::to_string(testImage_.width);
-    s += "x";
-    s += std::to_string(testImage_.height);
-    for (const auto& img : downImages_) {
-        s += " -> ";
-        s += std::to_string(img.width);
-        s += "x";
-        s += std::to_string(img.height);
-    }
-    for (const auto& img : upImages_) {
-        s += " => ";
-        s += std::to_string(img.width);
-        s += "x";
-        s += std::to_string(img.height);
-    }
+    s += blur_.pyramidInfo();
     s += "\n";
     return s;
 }

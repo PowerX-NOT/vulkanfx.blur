@@ -17,3 +17,7 @@ struct VulkanImage {
                 VkImageUsageFlags usage, std::string* error);
     void destroy();
 };
+
+void imageBarrier(VkCommandBuffer cmd, PFN_vkCmdPipelineBarrier2 cmdBarrier2, VkImage image,
+                  VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess, VkImageLayout oldLayout,
+                  VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess, VkImageLayout newLayout);
