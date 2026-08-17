@@ -1,0 +1,78 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform sampler2D blurred;
+layout(binding = 1, rgba8) uniform image2D dst;
+layout(binding = 2) uniform sampler2D original;
+
+// BlurFilter::drawBlurRegion — crossfade, zoomScale, paint alpha, optional SkRRect clip.
+layout(push_constant) uniform Params {
+    float resX;
+    float resY;
+    float blurAlpha;
+    float blurScale;
+    float mixFactor;
+    float rectL;
+    float rectT;
+    float rectR;
+    float rectB;
+    float radTL;
+    float radTR;
+    float radBR;
+    float radBL;
+    int clipRRect;
+} p;
+
+vec2 zoomUv(vec2 uv) {
+    if (p.blurScale == 1.0) {
+        return uv;
+    }
+    vec2 c = uv - 0.5;
+    c /= p.blurScale;
+    return c + 0.5;
+}
+
+float cornerRadius(vec2 q, vec4 r) {
+    // r is (TL, TR, BR, BL) to match BlurRegion params.
+    // q.x >= 0 => right half, q.y >= 0 => bottom half (Y grows downward).
+    if (q.x >= 0.0) {
+        return q.y >= 0.0 ? r.z : r.y; // BR or TR
+    }
+    return q.y >= 0.0 ? r.w : r.x;     // BL or TL
+}
+
+float sdRoundRect(vec2 p, vec2 halfSize, vec4 radii) {
+    float r = cornerRadius(p, radii);
+    vec2 q = abs(p) - halfSize + r;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+void main() {
+    const ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= int(p.resX) || px.y >= int(p.resY)) {
+        return;
+    }
+
+    float mask = 1.0;
+    if (p.clipRRect != 0) {
+        const vec2 center = vec2(p.rectL + p.rectR, p.rectT + p.rectB) * 0.5;
+        const vec2 halfSize = vec2(p.rectR - p.rectL, p.rectB - p.rectT) * 0.5;
+        const vec2 local = vec2(px) + 0.5 - center;
+        const float dist = sdRoundRect(local, halfSize, vec4(p.radTL, p.radTR, p.radBR, p.radBL));
+        // dist<0 => inside the rounded rect (SDF convention), dist>0 => outside.
+        // We want blur inside (mask~1) and sharp outside (mask~0).
+        mask = 1.0 - smoothstep(-1.0, 1.0, dist);
+        if (mask <= 0.0) {
+            return;
+        }
+    }
+
+    const vec2 uv = (vec2(px) + 0.5) / vec2(p.resX, p.resY);
+    const vec3 sharp = textureLod(original, uv, 0.0).rgb;
+    const vec3 blurOnly = textureLod(blurred, zoomUv(uv), 0.0).rgb;
+    const vec3 blurredLayer = mix(sharp, blurOnly, p.mixFactor);
+    const vec4 cur = imageLoad(dst, px);
+    const vec3 outRgb = mix(cur.rgb, blurredLayer, p.blurAlpha * mask);
+    imageStore(dst, px, vec4(outRgb, 1.0));
+}

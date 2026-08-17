@@ -12,6 +12,10 @@ import android.view.Surface
 class VulkanBlur {
     private var handle: Long = 0
     private var pendingRadius: Float = 24f
+    private var pendingLayerAlpha: Float = 1f
+    private var pendingBlurAlpha: Float = 1f
+    private var pendingBlurScale: Float = 1f
+    private var pendingRegions: Array<BlurRegion> = emptyArray()
     private var pendingBitmap: Bitmap? = null
     private var inputReady = false
 
@@ -23,6 +27,12 @@ class VulkanBlur {
             handle = nativeCreate(surface, enableValidation)
         }
         nativeSetRadius(handle, pendingRadius)
+        nativeSetLayerAlpha(handle, pendingLayerAlpha)
+        nativeSetBlurAlpha(handle, pendingBlurAlpha)
+        nativeSetBlurScale(handle, pendingBlurScale)
+        if (pendingRegions.isNotEmpty()) {
+            nativeSetBlurRegions(handle, pendingRegions)
+        }
         pendingBitmap?.let {
             nativeSetInputBitmap(handle, it)
             pendingBitmap = null
@@ -45,6 +55,37 @@ class VulkanBlur {
         pendingRadius = radius.coerceAtLeast(1f)
         if (handle != 0L) nativeSetRadius(handle, pendingRadius)
     }
+
+    /** AOSP LayerSnapshotBuilder: effective radius = requestedRadius * layerAlpha. */
+    @Synchronized
+    fun setLayerAlpha(alpha: Float) {
+        pendingLayerAlpha = alpha.coerceIn(0f, 1f)
+        if (handle != 0L) nativeSetLayerAlpha(handle, pendingLayerAlpha)
+    }
+
+    /** AOSP BlurFilter::drawBlurRegion compositing alpha. */
+    @Synchronized
+    fun setBlurAlpha(alpha: Float) {
+        pendingBlurAlpha = alpha.coerceIn(0f, 1f)
+        if (handle != 0L) nativeSetBlurAlpha(handle, pendingBlurAlpha)
+    }
+
+    /** AOSP backgroundBlurScale / zoom around blur center. */
+    @Synchronized
+    fun setBlurScale(scale: Float) {
+        pendingBlurScale = scale.coerceAtLeast(0.1f)
+        if (handle != 0L) nativeSetBlurScale(handle, pendingBlurScale)
+    }
+
+    /** AOSP BlurRegion list — per-rect blurred clips with rounded corners. */
+    @Synchronized
+    fun setBlurRegions(regions: List<BlurRegion>) {
+        pendingRegions = regions.toTypedArray()
+        if (handle != 0L) nativeSetBlurRegions(handle, pendingRegions)
+    }
+
+    @Synchronized
+    fun clearBlurRegions() = setBlurRegions(emptyList())
 
     /**
      * Pyramid inspect: 0 = final blur, 1 = first downsample, …, N = lowest level.
@@ -111,6 +152,10 @@ class VulkanBlur {
     private external fun nativeReleaseSurface(handle: Long)
     private external fun nativeResize(handle: Long, width: Int, height: Int)
     private external fun nativeSetRadius(handle: Long, radius: Float)
+    private external fun nativeSetLayerAlpha(handle: Long, alpha: Float)
+    private external fun nativeSetBlurAlpha(handle: Long, alpha: Float)
+    private external fun nativeSetBlurScale(handle: Long, scale: Float)
+    private external fun nativeSetBlurRegions(handle: Long, regions: Array<BlurRegion>)
     private external fun nativeSetDebugLevel(handle: Long, level: Int)
     private external fun nativeSetInputBitmap(handle: Long, bitmap: Bitmap)
     private external fun nativeRender(handle: Long)

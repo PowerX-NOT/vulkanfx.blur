@@ -4,6 +4,9 @@
 #include <android/native_window_jni.h>
 #include <jni.h>
 
+#include <algorithm>
+#include <vector>
+
 namespace {
 
 void throwState(JNIEnv* env, const char* msg) {
@@ -80,6 +83,85 @@ Java_com_vulkanfx_blur_VulkanBlur_nativeSetRadius(JNIEnv* env, jobject, jlong ha
     }
     if (!ctx->setRadius(radius)) {
         throwState(env, ctx->lastError().empty() ? "setRadius failed" : ctx->lastError().c_str());
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_vulkanfx_blur_VulkanBlur_nativeSetLayerAlpha(JNIEnv* env, jobject, jlong handle, jfloat alpha) {
+    VulkanContext* ctx = fromHandle(handle);
+    if (!ctx) {
+        throwState(env, "native handle is null");
+        return;
+    }
+    if (!ctx->setLayerAlpha(alpha)) {
+        throwState(env, ctx->lastError().empty() ? "setLayerAlpha failed" : ctx->lastError().c_str());
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_vulkanfx_blur_VulkanBlur_nativeSetBlurAlpha(JNIEnv* env, jobject, jlong handle, jfloat alpha) {
+    VulkanContext* ctx = fromHandle(handle);
+    if (!ctx) {
+        throwState(env, "native handle is null");
+        return;
+    }
+    if (!ctx->setBlurAlpha(alpha)) {
+        throwState(env, ctx->lastError().empty() ? "setBlurAlpha failed" : ctx->lastError().c_str());
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_vulkanfx_blur_VulkanBlur_nativeSetBlurScale(JNIEnv* env, jobject, jlong handle, jfloat scale) {
+    VulkanContext* ctx = fromHandle(handle);
+    if (!ctx) {
+        throwState(env, "native handle is null");
+        return;
+    }
+    if (!ctx->setBlurScale(scale)) {
+        throwState(env, ctx->lastError().empty() ? "setBlurScale failed" : ctx->lastError().c_str());
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_vulkanfx_blur_VulkanBlur_nativeSetBlurRegions(JNIEnv* env, jobject, jlong handle,
+                                                       jobjectArray regions) {
+    VulkanContext* ctx = fromHandle(handle);
+    if (!ctx) {
+        throwState(env, "native handle is null");
+        return;
+    }
+    std::vector<BlurRegion> native;
+    if (regions != nullptr) {
+        const jsize n = env->GetArrayLength(regions);
+        native.reserve(static_cast<size_t>(n));
+        for (jsize i = 0; i < n; ++i) {
+            jobject item = env->GetObjectArrayElement(regions, i);
+            if (!item) continue;
+            jclass cls = env->GetObjectClass(item);
+            auto intField = [&](const char* name) {
+                return env->GetIntField(item, env->GetFieldID(cls, name, "I"));
+            };
+            auto floatField = [&](const char* name) {
+                return env->GetFloatField(item, env->GetFieldID(cls, name, "F"));
+            };
+            BlurRegion r{};
+            r.blurRadius = static_cast<uint32_t>(std::max(0, intField("blurRadius")));
+            r.cornerRadiusTL = floatField("cornerRadiusTL");
+            r.cornerRadiusTR = floatField("cornerRadiusTR");
+            r.cornerRadiusBL = floatField("cornerRadiusBL");
+            r.cornerRadiusBR = floatField("cornerRadiusBR");
+            r.alpha = floatField("alpha");
+            r.left = intField("left");
+            r.top = intField("top");
+            r.right = intField("right");
+            r.bottom = intField("bottom");
+            native.push_back(r);
+            env->DeleteLocalRef(item);
+            env->DeleteLocalRef(cls);
+        }
+    }
+    if (!ctx->setBlurRegions(native)) {
+        throwState(env, ctx->lastError().empty() ? "setBlurRegions failed" : ctx->lastError().c_str());
     }
 }
 

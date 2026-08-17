@@ -16,6 +16,9 @@ static const uint32_t kUpSpv[] =
 static const uint32_t kDrawSpv[] =
 #include "kawase_draw_comp_spv.inc"
         ;
+static const uint32_t kCompositeSpv[] =
+#include "kawase_composite_comp_spv.inc"
+        ;
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "VulkanBlur", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "VulkanBlur", __VA_ARGS__)
@@ -30,6 +33,13 @@ struct KawasePush {
 };
 static_assert(sizeof(KawasePush) == 20, "push constant layout");
 
+struct CompositePush {
+    float resX, resY;
+    float blurAlpha;
+    float blurScale;
+    float mixFactor;
+};
+static_assert(sizeof(CompositePush) == 20, "push constant layout");
 struct KawaseMapped {
     uint32_t extraPasses;
     float step;
@@ -90,7 +100,14 @@ constexpr uint32_t kTsCount = 3;
 
 }  // namespace
 
+void KawaseBlur::destroyComposite() {
+    compositeImage_.destroy();
+    compositeSet_ = VK_NULL_HANDLE;
+    inputView_ = VK_NULL_HANDLE;
+}
+
 void KawaseBlur::destroyPyramid() {
+    destroyComposite();
     if (device_ == VK_NULL_HANDLE) return;
     if (descPool_ != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(device_, descPool_, nullptr);
@@ -111,6 +128,7 @@ void KawaseBlur::destroy() {
     destroyPyramid();
     if (queryPool_ != VK_NULL_HANDLE) vkDestroyQueryPool(device_, queryPool_, nullptr);
     if (drawPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, drawPipeline_, nullptr);
+    if (compositePipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, compositePipeline_, nullptr);
     if (upPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, upPipeline_, nullptr);
     if (downHalfPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, downHalfPipeline_, nullptr);
     if (downPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, downPipeline_, nullptr);
@@ -120,6 +138,7 @@ void KawaseBlur::destroy() {
     if (sampler_ != VK_NULL_HANDLE) vkDestroySampler(device_, sampler_, nullptr);
     queryPool_ = VK_NULL_HANDLE;
     drawPipeline_ = VK_NULL_HANDLE;
+    compositePipeline_ = VK_NULL_HANDLE;
     upPipeline_ = VK_NULL_HANDLE;
     downHalfPipeline_ = VK_NULL_HANDLE;
     downPipeline_ = VK_NULL_HANDLE;
@@ -132,6 +151,8 @@ void KawaseBlur::destroy() {
     device_ = VK_NULL_HANDLE;
     srcW_ = srcH_ = 0;
     radius_ = 0.0f;
+    blurAlpha_ = 1.0f;
+    blurScale_ = 1.0f;
     debugLevel_ = 0;
     pyramidReady_ = false;
     timestampPeriodNs_ = 0.0f;
@@ -278,6 +299,43 @@ bool KawaseBlur::ensurePipelines(std::string* error) {
     }
     if (!createComputePipeline(kUpSpv, sizeof(kUpSpv), &upPipeline_, error)) return false;
     if (!createComputePipeline(kDrawSpv, sizeof(kDrawSpv), &drawPipeline_, error)) return false;
+    if (!createComputePipeline(kCompositeSpv, sizeof(kCompositeSpv), &compositePipeline_, error)) {
+        return false;
+    }
+    return true;
+}
+
+bool KawaseBlur::needsComposite() const {
+    return blurAlpha_ < 0.999f || blurScale_ < 0.999f || blurScale_ > 1.001f;
+}
+
+bool KawaseBlur::ensureCompositeResources(const VulkanImage& src, std::string* error) {
+    inputView_ = src.view;
+    if (!needsComposite()) {
+        compositeImage_.destroy();
+        compositeSet_ = VK_NULL_HANDLE;
+        return true;
+    }
+    const VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (compositeImage_.image == VK_NULL_HANDLE || compositeImage_.width != src.width ||
+        compositeImage_.height != src.height) {
+        compositeImage_.destroy();
+        if (!compositeImage_.create(device_, physical_, src.width, src.height, VK_FORMAT_R8G8B8A8_UNORM,
+                                    usage, error)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool KawaseBlur::setBlurAlpha(float alpha) {
+    blurAlpha_ = std::clamp(alpha, 0.0f, 1.0f);
+    return true;
+}
+
+bool KawaseBlur::setBlurScale(float scale) {
+    blurScale_ = std::max(0.1f, scale);
     return true;
 }
 
@@ -341,14 +399,23 @@ bool KawaseBlur::rebuildPyramid(const VulkanImage& src, uint32_t extraPasses, st
             return false;
         }
     }
-    const bool needDraw = radius_ < kMaxCrossFadeRadius;
+    const bool needComposite = needsComposite();
+    const bool needDraw = !needComposite && radius_ < kMaxCrossFadeRadius;
+    inputView_ = src.view;
     if (needDraw) {
         if (!drawImage_.create(device_, physical_, srcW_, srcH_, VK_FORMAT_R8G8B8A8_UNORM, usage, error)) {
             return false;
         }
     }
+    if (needComposite) {
+        if (!compositeImage_.create(device_, physical_, srcW_, srcH_, VK_FORMAT_R8G8B8A8_UNORM, usage, error)) {
+            return false;
+        }
+    } else {
+        compositeImage_.destroy();
+    }
 
-    const uint32_t nSets = nDown + extraPasses + (needDraw ? 1u : 0u);
+    const uint32_t nSets = nDown + extraPasses + (needDraw ? 1u : 0u) + (needComposite ? 1u : 0u);
     VkDescriptorPoolSize poolSizes[2]{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     poolSizes[0].descriptorCount = nSets * 2;
@@ -399,6 +466,12 @@ bool KawaseBlur::rebuildPyramid(const VulkanImage& src, uint32_t extraPasses, st
     if (needDraw) {
         writeSet(drawSet_, blurOut.view, drawImage_.view, src.view, samplerMirror_);
     }
+    compositeSet_ = VK_NULL_HANDLE;
+    if (needComposite) {
+        std::vector<VkDescriptorSet> compositeSets;
+        if (!allocSets(1, &compositeSets)) return false;
+        compositeSet_ = compositeSets[0];
+    }
     pyramidReady_ = false;
     LOGI("kawase2 rebuild %ux%u extra=%u step=%.2f depth=%.2f", srcW_, srcH_, extraPasses, step_,
          filterDepth_);
@@ -428,14 +501,15 @@ bool KawaseBlur::setRadius(float radius, const VulkanImage& src, std::string* er
         if (error) *error = "KawaseBlur::setRadius before create";
         return false;
     }
-    const bool hadDraw = radius_ < kMaxCrossFadeRadius;
+    const bool hadDraw = radius_ < kMaxCrossFadeRadius && !needsComposite();
+    const bool hadComposite = needsComposite();
     const KawaseMapped mapped = mapRadius(radius);
-    const bool needDraw = radius < kMaxCrossFadeRadius;
+    const bool needDraw = !needsComposite() && radius < kMaxCrossFadeRadius;
     radius_ = radius;
     step_ = mapped.step;
     filterDepth_ = mapped.depth;
     if (mapped.extraPasses + 1 == downImages_.size() && src.width == srcW_ && src.height == srcH_) {
-        if (hadDraw == needDraw) return true;
+        if (hadDraw == needDraw && hadComposite == needsComposite()) return true;
         return rebuildPyramid(src, mapped.extraPasses, error);
     }
     return rebuildPyramid(src, mapped.extraPasses, error);
@@ -512,8 +586,10 @@ bool KawaseBlur::record(VkCommandBuffer cmd, std::string* error) {
                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
 
-    const bool mixOriginal =
-            debugLevel_ <= 0 && radius_ < kMaxCrossFadeRadius && drawImage_.image != VK_NULL_HANDLE;
+    const bool mixOriginal = !externalComposite_ && !needsComposite() && debugLevel_ <= 0 &&
+                             radius_ < kMaxCrossFadeRadius && drawImage_.image != VK_NULL_HANDLE;
+    const VulkanImage& pureBlur = blurOutput();
+
     if (mixOriginal) {
         const VkImageLayout drawOld =
                 pyramidReady_ ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
@@ -536,6 +612,36 @@ bool KawaseBlur::record(VkCommandBuffer cmd, std::string* error) {
                      VK_IMAGE_LAYOUT_GENERAL,
                      VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    } else if (!externalComposite_ && needsComposite() && compositeImage_.image != VK_NULL_HANDLE &&
+               compositeSet_ != VK_NULL_HANDLE && inputView_ != VK_NULL_HANDLE) {
+        writeSet(compositeSet_, pureBlur.view, compositeImage_.view, inputView_, samplerMirror_);
+        const VkImageLayout compositeOld =
+                pyramidReady_ ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+        imageBarrier(cmd, cmdBarrier2_, compositeImage_.image,
+                     VK_PIPELINE_STAGE_2_NONE, 0, compositeOld,
+                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_GENERAL);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compositePipeline_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_, 0, 1,
+                                &compositeSet_, 0, nullptr);
+        CompositePush compositePush{};
+        compositePush.resX = static_cast<float>(compositeImage_.width);
+        compositePush.resY = static_cast<float>(compositeImage_.height);
+        compositePush.blurAlpha = blurAlpha_;
+        compositePush.blurScale = blurScale_;
+        compositePush.mixFactor =
+                radius_ < kMaxCrossFadeRadius ? std::min(1.0f, radius_ / kMaxCrossFadeRadius) : 1.0f;
+        vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(compositePush),
+                           &compositePush);
+        vkCmdDispatch(cmd, (compositeImage_.width + 15u) / 16u, (compositeImage_.height + 15u) / 16u,
+                      1);
+        imageBarrier(cmd, cmdBarrier2_, compositeImage_.image,
+                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_GENERAL,
+                     VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    } else if (externalComposite_) {
+        // BlurEngine samples blurOutput; layout stays SHADER_READ_ONLY_OPTIMAL.
     } else {
         const VulkanImage& out = presentImage();
         imageBarrier(cmd, cmdBarrier2_, out.image,
@@ -572,12 +678,18 @@ void KawaseBlur::setDebugLevel(int level) {
     debugLevel_ = level;
 }
 
+const VulkanImage& KawaseBlur::blurOutput() const {
+    if (!upImages_.empty()) return upImages_.back();
+    return downImages_.front();
+}
+
 const VulkanImage& KawaseBlur::presentImage() const {
     if (debugLevel_ > 0 && !downImages_.empty()) {
         size_t i = static_cast<size_t>(debugLevel_) - 1;
         if (i >= downImages_.size()) i = downImages_.size() - 1;
         return downImages_[i];
     }
+    if (needsComposite() && compositeImage_.image != VK_NULL_HANDLE) return compositeImage_;
     if (radius_ < kMaxCrossFadeRadius && drawImage_.image != VK_NULL_HANDLE) return drawImage_;
     if (!upImages_.empty()) return upImages_.back();
     return downImages_.front();

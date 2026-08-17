@@ -8,9 +8,50 @@ import android.graphics.Paint
 import android.graphics.RadialGradient
 import android.graphics.Shader
 import android.graphics.Typeface
+import com.vulkanfx.blur.BlurRegion
 
 /** Demo-only wallpaper bitmap for the sample app (not part of the library). */
 object DemoScene {
+    /** AOSP-style blurRegions over the 720×1280 demo wallpaper. */
+    fun cardBlurRegions(blurRadius: Int): List<BlurRegion> = listOf(
+        BlurRegion(
+            blurRadius = blurRadius,
+            cornerRadiusTL = 40f,
+            cornerRadiusTR = 40f,
+            cornerRadiusBL = 40f,
+            cornerRadiusBR = 40f,
+            alpha = 0.92f,
+            left = 56,
+            top = 180,
+            right = 664,
+            bottom = 420,
+        ),
+        BlurRegion(
+            blurRadius = blurRadius,
+            cornerRadiusTL = 32f,
+            cornerRadiusTR = 32f,
+            cornerRadiusBL = 32f,
+            cornerRadiusBR = 32f,
+            alpha = 0.88f,
+            left = 96,
+            top = 500,
+            right = 624,
+            bottom = 720,
+        ),
+        BlurRegion(
+            blurRadius = blurRadius,
+            cornerRadiusTL = 28f,
+            cornerRadiusTR = 28f,
+            cornerRadiusBL = 28f,
+            cornerRadiusBR = 28f,
+            alpha = 0.85f,
+            left = 140,
+            top = 820,
+            right = 580,
+            bottom = 1040,
+        ),
+    )
+
     fun wallpaper(width: Int = 720, height: Int = 1280): Bitmap {
         val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val c = Canvas(bmp)

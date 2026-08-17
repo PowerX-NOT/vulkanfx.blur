@@ -3,8 +3,11 @@
     <string name="home_title">Blur Playground</string>
     <string name="home_subtitle">Pick a demo to open. More Material 3 experiments will be added here.</string>
     <string name="option_test_blur">Test Blur</string>
-    <string name="option_blur_alpha">Blur + Alpha (coming soon)</string>
-    <string name="option_card_clips">Card Clips (coming soon)</string>
+    <string name="option_blur_alpha">Blur + Alpha</string>
+    <string name="option_card_clips">Card Clips</string>
+    <string name="control_layer_alpha">Layer alpha (scales blur radius like AOSP)</string>
+    <string name="control_blur_alpha">Blur alpha (drawBlurRegion compositing)</string>
+    <string name="control_blur_scale">Blur scale (backgroundBlurScale zoom)</string>
     <string name="back_to_options">Back to options</string>
     <string name="hud_title">Blur radius</string>
     <string name="radius_value">%1$d px</string>

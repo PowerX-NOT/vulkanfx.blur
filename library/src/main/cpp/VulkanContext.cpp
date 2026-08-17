@@ -185,7 +185,7 @@ VulkanContext::~VulkanContext() {
     if (device_ != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_);
     }
-    blur_.destroy();
+    engine_.destroy();
     inputImage_.destroy();
     destroySwapchain();
     if (acquireSem_ != VK_NULL_HANDLE) vkDestroySemaphore(device_, acquireSem_, nullptr);
@@ -470,28 +470,31 @@ bool VulkanContext::createInputImage(uint32_t w, uint32_t h) {
     inputLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     return inputImage_.create(
             device_, physical_, w, h, VK_FORMAT_R8G8B8A8_UNORM,
-            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &error_);
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+            &error_);
+}
+
+bool VulkanContext::ensureEngineReady() {
+    if (engine_.ready()) return true;
+    if (inputImage_.image == VK_NULL_HANDLE) return true;
+    return engine_.init(device_, physical_, queueFamily_, cmdBarrier2_, &error_);
 }
 
 bool VulkanContext::rebuildBlurFromInput() {
-    if (blur_.passes() == 0) {
-        if (!blur_.create(device_, physical_, inputImage_, radius_, queueFamily_, cmdBarrier2_, &error_)) {
-            return false;
-        }
-    } else if (!blur_.resize(inputImage_, &error_)) {
-        return false;
-    }
-    return true;
+    if (!ensureEngineReady()) return false;
+    engine_.setLegacyRadius(requestedRadius_);
+    return engine_.setInput(inputImage_, &error_);
 }
 
 bool VulkanContext::ensureWorkingResources() {
     if (inputImage_.image == VK_NULL_HANDLE) return true;
-    if (blur_.passes() == 0) return rebuildBlurFromInput();
-    return true;
+    if (!engine_.ready()) return rebuildBlurFromInput();
+    return engine_.setInput(inputImage_, &error_);
 }
 
 bool VulkanContext::tryPresent() {
-    if (inputImage_.image == VK_NULL_HANDLE || blur_.passes() == 0) return true;
+    if (inputImage_.image == VK_NULL_HANDLE || !engine_.ready()) return true;
     return presentFrame();
 }
 
@@ -682,7 +685,7 @@ bool VulkanContext::presentFrame() {
 
     // Wait for the previous frame's GPU work, then read timestamps (pipelined frame loop).
     VK_TRY(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX));
-    blur_.collectTimestamps();
+    engine_.collectTimestamps();
 
     for (int attempt = 0; attempt < 2; ++attempt) {
         uint32_t index = 0;
@@ -705,7 +708,7 @@ bool VulkanContext::presentFrame() {
         begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         VK_TRY(vkBeginCommandBuffer(cmd_, &begin));
-        if (blur_.passes() > 0 && !blur_.record(cmd_, &error_)) return false;
+        if (engine_.ready() && !engine_.record(cmd_, &error_)) return false;
 
         // Acquired swapchain image: contents discarded. Make it a blit destination.
         // Acquire semaphore (submit wait) covers GPU availability. Layout is UNDEFINED until we transition.
@@ -717,7 +720,7 @@ bool VulkanContext::presentFrame() {
         VkImageBlit blit{};
         blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         blit.srcSubresource.layerCount = 1;
-        const VulkanImage& src = blur_.presentImage();
+        const VulkanImage& src = engine_.output();
         blit.srcOffsets[1] = {static_cast<int32_t>(src.width), static_cast<int32_t>(src.height), 1};
         blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         blit.dstSubresource.layerCount = 1;
@@ -815,21 +818,34 @@ bool VulkanContext::setSurface(ANativeWindow* window) {
 }
 
 bool VulkanContext::setRadius(float radius) {
-    radius_ = radius;
-    if (radius == blur_.radius() && blur_.passes() > 0) return true;
-    if (inputImage_.image == VK_NULL_HANDLE) {
-        return true;  // applied on next ensureWorkingResources / surface
-    }
-    return blur_.setRadius(radius, inputImage_, &error_);
+    requestedRadius_ = std::max(1.f, radius);
+    engine_.setLegacyRadius(requestedRadius_);
+    return true;
+}
+
+bool VulkanContext::setLayerAlpha(float alpha) {
+    return engine_.setLayerAlpha(alpha);
+}
+
+bool VulkanContext::setBlurAlpha(float alpha) {
+    return engine_.setFullFrameBlurAlpha(alpha);
+}
+
+bool VulkanContext::setBlurScale(float scale) {
+    return engine_.setBackgroundBlurScale(scale);
+}
+
+bool VulkanContext::setBlurRegions(const std::vector<BlurRegion>& regions) {
+    return engine_.setBlurRegions(regions);
 }
 
 bool VulkanContext::setDebugLevel(int level) {
-    blur_.setDebugLevel(level);
+    engine_.setDebugLevel(level);
     return true;
 }
 
 bool VulkanContext::render() {
-    if (inputImage_.image == VK_NULL_HANDLE || blur_.passes() == 0) {
+    if (inputImage_.image == VK_NULL_HANDLE || !engine_.ready()) {
         error_ = "render before working resources";
         return false;
     }
@@ -865,13 +881,13 @@ std::string VulkanContext::info() const {
     s += sync2_ ? "yes" : "no";
     s += "\n";
     s += "timestamps=";
-    s += blur_.timestampsEnabled() ? "yes" : "no";
+    s += engine_.timestampsEnabled() ? "yes" : "no";
     s += "\n";
-    if (blur_.totalMs() >= 0.0f) {
+    if (engine_.totalMs() >= 0.0f) {
         char timing[128];
-        const float downMs = blur_.downMs();
-        const float upMs = blur_.upMs();
-        const float totalMs = blur_.totalMs();
+        const float downMs = engine_.downMs();
+        const float upMs = engine_.upMs();
+        const float totalMs = engine_.totalMs();
         std::snprintf(timing, sizeof(timing),
                       "downsample=%.3fms\nupsample=%.3fms\ntotal=%.3fms\n",
                       downMs, upMs, totalMs);
@@ -899,20 +915,12 @@ std::string VulkanContext::info() const {
     s += "x";
     s += std::to_string(inputImage_.height);
     s += inputImage_.image != VK_NULL_HANDLE ? " R8G8B8A8\n" : " none\n";
-    s += "radius=";
-    s += std::to_string(blur_.radius());
+    s += "requestedRadius=";
+    s += std::to_string(requestedRadius_);
     s += "\n";
-    s += "passes=";
-    s += std::to_string(blur_.passes());
-    s += "\n";
+    s += engine_.infoExtra();
     s += "debugLevel=";
-    s += std::to_string(blur_.debugLevel());
-    s += "\n";
-    s += "offset=";
-    s += std::to_string(blur_.offset());
-    s += "\n";
-    s += "pyramid=";
-    s += blur_.pyramidInfo();
+    s += std::to_string(engine_.debugLevel());
     s += "\n";
     return s;
 }

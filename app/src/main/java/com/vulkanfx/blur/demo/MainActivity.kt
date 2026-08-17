@@ -19,6 +19,7 @@ import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
 import android.window.OnBackInvokedCallback
+import com.vulkanfx.blur.BlurRegion
 import com.vulkanfx.blur.VulkanBlurView
 
 class MainActivity : Activity() {
@@ -27,6 +28,11 @@ class MainActivity : Activity() {
     private var showDebug = false
     private var showDeviceInfo = false
     private var onHome = true
+    private var alphaDemo = false
+    private var cardsDemo = false
+    private var layerAlphaPct = 100
+    private var blurAlphaPct = 70
+    private var blurScalePct = 50
 
     private val backInvokedCallback = OnBackInvokedCallback { handleBack() }
 
@@ -37,6 +43,11 @@ class MainActivity : Activity() {
         showDebug = savedInstanceState?.getBoolean(KEY_SHOW_DEBUG, false) ?: false
         showDeviceInfo = savedInstanceState?.getBoolean(KEY_SHOW_INFO, false) ?: false
         onHome = savedInstanceState?.getBoolean(KEY_HOME, true) ?: true
+        alphaDemo = savedInstanceState?.getBoolean(KEY_ALPHA_DEMO, false) ?: false
+        cardsDemo = savedInstanceState?.getBoolean(KEY_CARDS_DEMO, false) ?: false
+        layerAlphaPct = savedInstanceState?.getInt(KEY_LAYER_ALPHA, 100) ?: 100
+        blurAlphaPct = savedInstanceState?.getInt(KEY_BLUR_ALPHA, 70) ?: 70
+        blurScalePct = savedInstanceState?.getInt(KEY_BLUR_SCALE, 50) ?: 50
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             onBackInvokedDispatcher.registerOnBackInvokedCallback(
@@ -91,7 +102,12 @@ class MainActivity : Activity() {
     }
 
     private fun showScreen() {
-        if (onHome) showHomeScreen() else showDemoScreen()
+        when {
+            onHome -> showHomeScreen()
+            alphaDemo -> showAlphaDemoScreen()
+            cardsDemo -> showCardClipsDemo()
+            else -> showDemoScreen()
+        }
         enableFullscreen()
     }
 
@@ -132,6 +148,8 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             addView(
                 optionCard(getString(R.string.option_test_blur), enabled = true) {
+                    alphaDemo = false
+                    cardsDemo = false
                     onHome = false
                     showScreen()
                 },
@@ -141,14 +159,24 @@ class MainActivity : Activity() {
                 ),
             )
             addView(
-                optionCard(getString(R.string.option_blur_alpha), enabled = false) {},
+                optionCard(getString(R.string.option_blur_alpha), enabled = true) {
+                    alphaDemo = true
+                    cardsDemo = false
+                    onHome = false
+                    showScreen()
+                },
                 LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                 ).apply { topMargin = 24 },
             )
             addView(
-                optionCard(getString(R.string.option_card_clips), enabled = false) {},
+                optionCard(getString(R.string.option_card_clips), enabled = true) {
+                    alphaDemo = false
+                    cardsDemo = true
+                    onHome = false
+                    showScreen()
+                },
                 LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -180,7 +208,28 @@ class MainActivity : Activity() {
         )
     }
 
-    private fun showDemoScreen() {
+    private fun showAlphaDemoScreen() {
+        showDemoScreen(
+            alphaControls = true,
+            initialLayerAlpha = layerAlphaPct / 100f,
+            initialBlurAlpha = blurAlphaPct / 100f,
+            initialBlurScale = 0.5f + blurScalePct / 100f,
+        )
+    }
+
+    private fun showCardClipsDemo() {
+        showDemoScreen(blurRegions = cardClipRegions())
+    }
+
+    private fun cardClipRegions(): List<BlurRegion> = DemoScene.cardBlurRegions(radius)
+
+    private fun showDemoScreen(
+        alphaControls: Boolean = false,
+        initialLayerAlpha: Float = 1f,
+        initialBlurAlpha: Float = 1f,
+        initialBlurScale: Float = 1f,
+        blurRegions: List<BlurRegion> = emptyList(),
+    ) {
         val deviceInfo = TextView(this).apply {
             setTextColor(Color.WHITE)
             setBackgroundResource(R.drawable.hud_chip)
@@ -192,6 +241,10 @@ class MainActivity : Activity() {
 
         val blurView = VulkanBlurView(this, blurRadius = radius.toFloat()).apply {
             this.debugLevel = debugLevel
+            layerAlpha = initialLayerAlpha
+            blurAlpha = initialBlurAlpha
+            blurScale = initialBlurScale
+            this.blurRegions = blurRegions
             setInputBitmap(DemoScene.wallpaper())
             onStatus = { deviceInfo.text = it }
         }
@@ -205,11 +258,68 @@ class MainActivity : Activity() {
                 override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                     if (!fromUser) return
                     radius = progress.coerceAtLeast(1)
-                    blurView.blurRadius = radius.toFloat()
+                    if (blurRegions.isNotEmpty()) {
+                        blurView.blurRegions = cardClipRegions()
+                    } else {
+                        blurView.blurRadius = radius.toFloat()
+                    }
                 }
                 override fun onStartTrackingTouch(seekBar: SeekBar?) {}
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {}
             })
+        }
+
+        fun alphaSlider(
+            labelRes: Int,
+            progress: Int,
+            onChanged: (Float) -> Unit,
+        ): LinearLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(TextView(context).apply {
+                text = getString(labelRes)
+                setTextColor(Color.WHITE)
+                textSize = 14f
+                typeface = Typeface.DEFAULT_BOLD
+            })
+            addView(SeekBar(context).apply {
+                max = 100
+                this.progress = progress
+                setProgressTintList(ColorStateList.valueOf(0xFFFFFFFF.toInt()))
+                setThumbTintList(ColorStateList.valueOf(0xFFFFFFFF.toInt()))
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(seekBar: SeekBar?, value: Int, fromUser: Boolean) {
+                        if (!fromUser) return
+                        onChanged(value / 100f)
+                    }
+                    override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                    override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+                })
+            })
+        }
+
+        val layerAlphaSlider = if (alphaControls) {
+            alphaSlider(R.string.control_layer_alpha, layerAlphaPct) { value ->
+                layerAlphaPct = (value * 100).toInt()
+                blurView.layerAlpha = value
+            }
+        } else {
+            null
+        }
+        val blurAlphaSlider = if (alphaControls) {
+            alphaSlider(R.string.control_blur_alpha, blurAlphaPct) { value ->
+                blurAlphaPct = (value * 100).toInt()
+                blurView.blurAlpha = value
+            }
+        } else {
+            null
+        }
+        val blurScaleSlider = if (alphaControls) {
+            alphaSlider(R.string.control_blur_scale, blurScalePct) { fraction ->
+                blurScalePct = (fraction * 100).toInt()
+                blurView.blurScale = 0.5f + fraction
+            }
+        } else {
+            null
         }
 
         val debugPanel = LinearLayout(this).apply {
@@ -247,6 +357,9 @@ class MainActivity : Activity() {
                 typeface = Typeface.DEFAULT_BOLD
             })
             addView(radiusSlider)
+            layerAlphaSlider?.let { addView(it) }
+            blurAlphaSlider?.let { addView(it) }
+            blurScaleSlider?.let { addView(it) }
             addView(Switch(context).apply {
                 text = getString(R.string.show_debug)
                 setTextColor(Color.WHITE)
@@ -314,6 +427,11 @@ class MainActivity : Activity() {
         outState.putBoolean(KEY_SHOW_DEBUG, showDebug)
         outState.putBoolean(KEY_SHOW_INFO, showDeviceInfo)
         outState.putBoolean(KEY_HOME, onHome)
+        outState.putBoolean(KEY_ALPHA_DEMO, alphaDemo)
+        outState.putBoolean(KEY_CARDS_DEMO, cardsDemo)
+        outState.putInt(KEY_LAYER_ALPHA, layerAlphaPct)
+        outState.putInt(KEY_BLUR_ALPHA, blurAlphaPct)
+        outState.putInt(KEY_BLUR_SCALE, blurScalePct)
     }
 
     private companion object {
@@ -322,6 +440,11 @@ class MainActivity : Activity() {
         const val KEY_SHOW_DEBUG = "show_debug"
         const val KEY_SHOW_INFO = "show_device_info"
         const val KEY_HOME = "home_screen"
+        const val KEY_ALPHA_DEMO = "alpha_demo"
+        const val KEY_CARDS_DEMO = "cards_demo"
+        const val KEY_LAYER_ALPHA = "layer_alpha"
+        const val KEY_BLUR_ALPHA = "blur_alpha"
+        const val KEY_BLUR_SCALE = "blur_scale"
         const val DEFAULT_RADIUS = 24
     }
 }

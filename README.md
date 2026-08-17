@@ -45,12 +45,24 @@ val blurView = VulkanBlurView(context).apply {
 // It renders automatically when the surface is ready.
 ```
 
-Update blur or content anytime:
+Update blur, alpha, regions, or content anytime:
 
 ```kotlin
 blurView.blurRadius = 32f
+blurView.layerAlpha = 0.8f      // scales background blur radius (AOSP LayerSnapshotBuilder)
+blurView.blurAlpha = 0.9f       // draw alpha for full-frame background blur
+blurView.blurScale = 1.1f       // zoom around center (AOSP backgroundBlurScale)
+blurView.blurRegions = listOf(
+    BlurRegion(
+        blurRadius = 24,
+        cornerRadiusTL = 32f, cornerRadiusTR = 32f,
+        cornerRadiusBL = 32f, cornerRadiusBR = 32f,
+        alpha = 0.9f,
+        left = 48, top = 120, right = 672, bottom = 360,
+    ),
+)
 blurView.setInputBitmap(updatedBitmap)
-blurView.requestRender()  // optional; radius/bitmap changes already schedule a frame
+blurView.requestRender()  // optional; property changes already schedule a frame
 ```
 
 Optional callbacks:
@@ -94,7 +106,11 @@ blur.detach()          // destroy Vulkan context
 |--------|-------------|
 | `attach(surface)` | Create Vulkan device + swapchain for `surface`. |
 | `setInputBitmap(bitmap)` | Upload ARGB_8888 pixels (max edge 1280). **Required** before `render()`. |
-| `setBlurRadius(radius)` | Blur strength; ≥ 1. Same scale as AOSP window blur radius. |
+| `setBlurRadius(radius)` | Full-frame background blur (`backgroundBlurRadius` when no regions). Scaled by `layerAlpha`. |
+| `setLayerAlpha(alpha)` | Scales effective background blur radius (`color.a * radius`, AOSP `LayerSnapshotBuilder`). |
+| `setBlurAlpha(alpha)` | Compositing alpha when drawing full-frame background blur (`drawBlurRegion` alpha). |
+| `setBlurScale(scale)` | Zoom around blur center (`backgroundBlurScale`). |
+| `setBlurRegions(regions)` | Rounded-rect blurred clips (`BlurRegion` list, AOSP `blurRegions`). |
 | `setDebugLevel(level)` | `0` = final output; `1..N` = downsample pyramid stage (debug). |
 | `render()` | Record Kawase passes + blit to swapchain + present. |
 | `resize(w, h)` | Swapchain recreate on surface size change. |
@@ -103,19 +119,24 @@ blur.detach()          // destroy Vulkan context
 
 ## Radius behaviour (AOSP parity)
 
-- Internally scaled by `× 0.57735` to match Skia Gaussian equivalence.
-- **Radius &lt; 10**: full-resolution mix pass blends blurred output with the original (crossfade).
-- **Radius ≥ 10**: blur stays at quarter resolution; present upsamples with linear filtering (same strategy as SF `drawBlurRegion`).
+Matches `BlurFilter::drawBlurRegion` + `SkiaRenderEngine` blur path:
+
+- Kawase generation uses the same `× 0.57735` sigma scale as AOSP `KawaseBlurDualFilterV2`.
+- **Background blur**: `effectiveRadius = backgroundBlurRadius * layerAlpha` (or legacy `setBlurRadius` when no regions).
+- **Blur regions**: per-region radius (not scaled by layer alpha); draw alpha = `region.alpha * layerAlpha`; scale = 1.
+- **Radius &lt; 10**: crossfade between sharp input and blurred output (`mixFactor = radius / 10`).
+- **Radius ≥ 10**: quarter-res Kawase pyramid; composite samples with linear filtering + optional zoom.
+- **Rounded clips**: SDF rounded-rect mask per `BlurRegion` corner radii.
 
 ## Architecture
 
 ```
-VulkanBlurView  →  VulkanBlur (Kotlin/JNI)  →  VulkanContext  →  KawaseBlur  →  compute shaders
-                                                      ↓
-                                            swapchain blit + present (one submit / frame)
+VulkanBlurView  →  VulkanBlur (Kotlin/JNI)  →  VulkanContext  →  BlurEngine  →  KawaseBlur (pyramid)
+                                                      ↓                    ↓
+                                            swapchain blit + present   kawase_composite.comp (drawBlurRegion)
 ```
 
-Shaders: `kawase_down.comp`, `kawase_up.comp`, `kawase_draw.comp` (SPIR-V embedded at build time).
+Shaders: `kawase_down.comp`, `kawase_up.comp`, `kawase_draw.comp`, `kawase_composite.comp` (SPIR-V embedded at build time).
 
 ## Demo app
 
@@ -123,11 +144,34 @@ Shaders: `kawase_down.comp`, `kawase_up.comp`, `kawase_draw.comp` (SPIR-V embedd
 ./gradlew :app:installDebug
 ```
 
-The demo draws a synthetic wallpaper (`DemoScene` in `:app` only), exposes a radius slider, optional pyramid debug, and GPU timing HUD.
+The demo draws a synthetic wallpaper (`DemoScene` in `:app` only) and exposes three modes:
+
+- **Test Blur** — full-frame background blur + radius slider
+- **Blur + Alpha** — layer alpha, blur alpha, and blur scale sliders
+- **Card Clips** — three rounded `BlurRegion` clips over the wallpaper
+
+## AOSP parity scope
+
+**Implemented (RenderEngine blur path):**
+
+| AOSP | This library |
+|------|----------------|
+| `BlurFilter::drawBlurRegion` | `kawase_composite.comp` + `BlurEngine::drawBlurRegion` |
+| `backgroundBlurRadius`, `backgroundBlurScale` | `setBlurRadius`, `setBlurScale` |
+| `layerAlpha` → radius scale | `setLayerAlpha` |
+| `BlurRegion` rounded clips | `setBlurRegions` / `BlurRegion` |
+| Kawase V2 pyramid | `KawaseBlur` |
+
+**Not in scope for an app/library module** (SurfaceFlinger / full system compositor):
+
+- `blurRegionTransform` (identity assumed)
+- `layerHasBlur` opaque-layer skip (no layer content pipeline)
+- Live multi-layer snapshots (host supplies one bitmap)
+- `Transaction.setBackgroundBlurRadius` / SF integration
+- Actual `SurfaceFlinger` layer ownership, capture, scheduling, and composition policy
 
 ## Limitations
 
-- **Blur-only** — no rounded-rect clip, layer alpha, or zoom transform (those are compositor concerns in AOSP `BlurFilter::drawBlurRegion`).
 - **Bitmap in, Surface out** — you supply pixels; capturing behind-glass content is the host app’s job.
 - **arm64-v8a** — extend `abiFilters` in `library/build.gradle.kts` to ship other ABIs.
 

@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "KawaseBlur.h"
+#include "BlurEngine.h"
 
 class VulkanContext {
 public:
@@ -19,16 +19,23 @@ public:
     std::string info() const;
     bool resize(uint32_t width, uint32_t height);
     bool setRadius(float radius);
+    bool setLayerAlpha(float alpha);
+    bool setBlurAlpha(float alpha);
+    bool setBlurScale(float scale);
+    bool setBlurRegions(const std::vector<BlurRegion>& regions);
     bool setDebugLevel(int level);
     bool setInputRgba(const uint8_t* rgba, uint32_t width, uint32_t height);
     bool render();
     void releaseSurface();
     bool setSurface(ANativeWindow* window);
     const std::string& lastError() const { return error_; }
-    float downMs() const { return blur_.downMs(); }
-    float upMs() const { return blur_.upMs(); }
-    float totalMs() const { return blur_.totalMs(); }
-    int debugLevel() const { return blur_.debugLevel(); }
+    float downMs() const { return engine_.downMs(); }
+    float upMs() const { return engine_.upMs(); }
+    float totalMs() const { return engine_.totalMs(); }
+    float layerAlpha() const { return engine_.layerAlpha(); }
+    float blurAlpha() const { return engine_.fullFrameBlurAlpha(); }
+    float blurScale() const { return engine_.backgroundBlurScale(); }
+    int debugLevel() const { return engine_.debugLevel(); }
 
 private:
     VulkanContext() = default;
@@ -45,6 +52,7 @@ private:
     bool createInputImage(uint32_t w, uint32_t h);
     bool uploadInputRgba(const uint8_t* rgba);
     bool rebuildBlurFromInput();
+    bool ensureEngineReady();
     bool ensureWorkingResources();
     bool presentFrame();
     bool tryPresent();
@@ -72,8 +80,8 @@ private:
     VkExtent2D swapchainExtent_{};
     std::vector<VkImage> swapchainImages_;
     VulkanImage inputImage_;
-    KawaseBlur blur_;
-    float radius_ = 24.0f;
+    BlurEngine engine_;
+    float requestedRadius_ = 24.0f;
     PFN_vkCmdPipelineBarrier2 cmdBarrier2_ = nullptr;
     VkPhysicalDeviceProperties props_{};
     uint32_t instanceApi_ = VK_API_VERSION_1_1;

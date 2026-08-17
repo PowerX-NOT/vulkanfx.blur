@@ -36,6 +36,58 @@ class VulkanBlurView @JvmOverloads constructor(
             }
         }
 
+    /** Layer alpha scales blur strength (AOSP backgroundBlurRadius *= color.a). */
+    var layerAlpha: Float = 1f
+        set(value) {
+            field = value.coerceIn(0f, 1f)
+            try {
+                blur.setLayerAlpha(field)
+                requestRender()
+            } catch (e: IllegalStateException) {
+                Log.e(TAG, "Vulkan setLayerAlpha failed", e)
+                onStatus?.invoke("VulkanBlur setLayerAlpha failed:\n${e.message}")
+            }
+        }
+
+    /** Compositing alpha when drawing the blurred region. */
+    var blurAlpha: Float = 1f
+        set(value) {
+            field = value.coerceIn(0f, 1f)
+            try {
+                blur.setBlurAlpha(field)
+                requestRender()
+            } catch (e: IllegalStateException) {
+                Log.e(TAG, "Vulkan setBlurAlpha failed", e)
+                onStatus?.invoke("VulkanBlur setBlurAlpha failed:\n${e.message}")
+            }
+        }
+
+    /** Zoom scale around blur center (AOSP backgroundBlurScale). */
+    var blurScale: Float = 1f
+        set(value) {
+            field = value.coerceAtLeast(0.1f)
+            try {
+                blur.setBlurScale(field)
+                requestRender()
+            } catch (e: IllegalStateException) {
+                Log.e(TAG, "Vulkan setBlurScale failed", e)
+                onStatus?.invoke("VulkanBlur setBlurScale failed:\n${e.message}")
+            }
+        }
+
+    /** Rounded-rect blur clips (AOSP blurRegions). */
+    var blurRegions: List<BlurRegion> = emptyList()
+        set(value) {
+            field = value
+            try {
+                blur.setBlurRegions(value)
+                requestRender()
+            } catch (e: IllegalStateException) {
+                Log.e(TAG, "Vulkan setBlurRegions failed", e)
+                onStatus?.invoke("VulkanBlur setBlurRegions failed:\n${e.message}")
+            }
+        }
+
     /** 0 = final blur output; 1..N = downsample pyramid levels. */
     var debugLevel: Int = 0
         set(value) {
@@ -102,6 +154,10 @@ class VulkanBlurView @JvmOverloads constructor(
         try {
             val debug = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
             blur.setBlurRadius(blurRadius)
+            blur.setLayerAlpha(layerAlpha)
+            blur.setBlurAlpha(blurAlpha)
+            blur.setBlurScale(blurScale)
+            if (blurRegions.isNotEmpty()) blur.setBlurRegions(blurRegions)
             blur.setDebugLevel(debugLevel)
             val info = blur.attach(surface, enableValidation = debug)
             onStatus?.invoke(info)

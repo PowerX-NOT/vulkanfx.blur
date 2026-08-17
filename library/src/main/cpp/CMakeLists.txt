@@ -8,6 +8,7 @@ add_library(vulkanblur SHARED
     VulkanImage.cpp
     VulkanBuffer.cpp
     KawaseBlur.cpp
+    BlurEngine.cpp
     jni.cpp
 )
 
@@ -54,6 +55,8 @@ endmacro()
 embed_comp(kawase_down)
 embed_comp(kawase_up)
 embed_comp(kawase_draw)
+embed_comp(kawase_composite)
 set_source_files_properties(KawaseBlur.cpp PROPERTIES OBJECT_DEPENDS "${_shader_incs}")
+set_source_files_properties(BlurEngine.cpp PROPERTIES OBJECT_DEPENDS "${_shader_incs}")
 add_custom_target(shaders DEPENDS ${_shader_incs})
 add_dependencies(vulkanblur shaders)
