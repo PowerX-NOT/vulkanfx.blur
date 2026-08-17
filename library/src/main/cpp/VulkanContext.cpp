@@ -94,9 +94,21 @@ const char* presentModeName(VkPresentModeKHR m) {
     }
 }
 
-constexpr uint32_t kTestSize = 256;
 constexpr uint32_t kTestCell = 32;
-constexpr float kDefaultRadius = 24.0f;
+// ponytail: cap work edge so rotate doesn't re-upload a full 4K checker every time.
+constexpr uint32_t kMaxWorkEdge = 1280;
+
+VkExtent2D workExtentFor(VkExtent2D swap) {
+    if (swap.width == 0 || swap.height == 0) return {256, 256};
+    uint32_t w = swap.width;
+    uint32_t h = swap.height;
+    const uint32_t m = std::max(w, h);
+    if (m > kMaxWorkEdge) {
+        w = std::max(1u, (w * kMaxWorkEdge) / m);
+        h = std::max(1u, (h * kMaxWorkEdge) / m);
+    }
+    return {w, h};
+}
 
 std::vector<VkLayerProperties> instanceLayers() {
     uint32_t n = 0;
@@ -210,14 +222,9 @@ bool VulkanContext::init(ANativeWindow* window, bool enableValidation) {
     if (!createDevice()) return false;
     if (!createCommandPool()) return false;
     if (!createSyncObjects()) return false;
-    if (!createTestTexture()) return false;
-    if (!uploadTestTexture()) return false;
-    if (!blur_.create(device_, physical_, testImage_, kDefaultRadius, cmdBarrier2_, &error_)) {
-        return false;
-    }
-    if (!blur_.execute(cmd_, queue_, &error_)) return false;
     if (!createSwapchain()) return false;
     if (swapchainExtent_.width > 0 && swapchainExtent_.height > 0) {
+        if (!ensureWorkingResources()) return false;
         if (!presentTest()) return false;
     }
     LOGI("%s", info().c_str());
@@ -455,10 +462,34 @@ void VulkanContext::barrierImage(VkCommandBuffer cmd, VkImage image,
     imageBarrier(cmd, cmdBarrier2_, image, srcStage, srcAccess, oldLayout, dstStage, dstAccess, newLayout);
 }
 
-bool VulkanContext::createTestTexture() {
+bool VulkanContext::createTestTexture(uint32_t w, uint32_t h) {
     return testImage_.create(
-            device_, physical_, kTestSize, kTestSize, VK_FORMAT_R8G8B8A8_UNORM,
+            device_, physical_, w, h, VK_FORMAT_R8G8B8A8_UNORM,
             VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &error_);
+}
+
+bool VulkanContext::ensureWorkingResources() {
+    const VkExtent2D work = workExtentFor(swapchainExtent_);
+    const bool sizeChanged = testImage_.image == VK_NULL_HANDLE ||
+                             testImage_.width != work.width || testImage_.height != work.height;
+    if (sizeChanged) {
+        if (!createTestTexture(work.width, work.height)) return false;
+        if (!uploadTestTexture()) return false;
+        if (blur_.passes() == 0) {
+            if (!blur_.create(device_, physical_, testImage_, radius_, cmdBarrier2_, &error_)) {
+                return false;
+            }
+        } else if (!blur_.resize(testImage_, &error_)) {
+            return false;
+        }
+        if (!blur_.execute(cmd_, queue_, &error_)) return false;
+    } else if (blur_.passes() == 0) {
+        if (!blur_.create(device_, physical_, testImage_, radius_, cmdBarrier2_, &error_)) {
+            return false;
+        }
+        if (!blur_.execute(cmd_, queue_, &error_)) return false;
+    }
+    return true;
 }
 
 bool VulkanContext::uploadTestTexture() {
@@ -654,6 +685,7 @@ bool VulkanContext::presentTest() {
             vkDeviceWaitIdle(device_);
             if (!createSwapchain()) return false;
             if (swapchain_ == VK_NULL_HANDLE || swapchainImages_.empty()) return true;
+            if (!ensureWorkingResources()) return false;
             continue;
         }
         if (acquired != VK_SUCCESS && acquired != VK_SUBOPTIMAL_KHR) {
@@ -719,6 +751,7 @@ bool VulkanContext::presentTest() {
             VK_TRY(vkQueueWaitIdle(queue_));
             vkDeviceWaitIdle(device_);
             if (!createSwapchain()) return false;
+            if (!ensureWorkingResources()) return false;
             continue;
         }
         if (presented != VK_SUCCESS) {
@@ -735,17 +768,51 @@ bool VulkanContext::presentTest() {
 
 bool VulkanContext::resize(uint32_t width, uint32_t height) {
     if (width == 0 || height == 0) return true;
-    if (swapchain_ != VK_NULL_HANDLE && width == swapchainExtent_.width && height == swapchainExtent_.height) {
-        return true;
+    const bool extentSame = swapchain_ != VK_NULL_HANDLE &&
+                            width == swapchainExtent_.width && height == swapchainExtent_.height;
+    if (!extentSame) {
+        vkDeviceWaitIdle(device_);
+        if (!createSwapchain()) return false;
     }
-    vkDeviceWaitIdle(device_);
+    if (swapchainExtent_.width == 0 || swapchainExtent_.height == 0) return true;
+    // Always re-check work size: present OUT_OF_DATE can update swapchain before surfaceChanged.
+    if (!ensureWorkingResources()) return false;
+    return presentTest();
+}
+
+void VulkanContext::releaseSurface() {
+    if (device_ != VK_NULL_HANDLE) vkDeviceWaitIdle(device_);
+    destroySwapchain();
+    if (surface_ != VK_NULL_HANDLE) {
+        vkDestroySurfaceKHR(instance_, surface_, nullptr);
+        surface_ = VK_NULL_HANDLE;
+    }
+    if (window_) {
+        ANativeWindow_release(window_);
+        window_ = nullptr;
+    }
+}
+
+bool VulkanContext::setSurface(ANativeWindow* window) {
+    if (!window) {
+        error_ = "setSurface: null window";
+        return false;
+    }
+    releaseSurface();
+    window_ = window;
+    if (!createSurface()) return false;
     if (!createSwapchain()) return false;
     if (swapchainExtent_.width == 0 || swapchainExtent_.height == 0) return true;
+    if (!ensureWorkingResources()) return false;
     return presentTest();
 }
 
 bool VulkanContext::setRadius(float radius) {
-    if (radius == blur_.radius()) return true;
+    radius_ = radius;
+    if (radius == blur_.radius() && blur_.passes() > 0) return true;
+    if (testImage_.image == VK_NULL_HANDLE) {
+        return true;  // applied on next ensureWorkingResources / surface
+    }
     vkDeviceWaitIdle(device_);
     if (!blur_.setRadius(radius, testImage_, &error_)) return false;
     if (!blur_.execute(cmd_, queue_, &error_)) return false;
@@ -758,8 +825,8 @@ std::string VulkanContext::info() const {
     const bool timestamps = props_.limits.timestampComputeAndGraphics == VK_TRUE &&
                             props_.limits.timestampPeriod > 0.0f;
     std::string s;
-    s += "VulkanBlur Phase 8\n";
-    s += "status=radius\n";
+    s += "VulkanBlur Phase 9\n";
+    s += "status=resize\n";
     s += "device=";
     s += props_.deviceName;
     s += "\n";

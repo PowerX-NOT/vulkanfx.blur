@@ -12,8 +12,12 @@ import android.widget.TextView
 import com.vulkanfx.blur.VulkanBlurView
 
 class MainActivity : Activity() {
+    private var radius = DEFAULT_RADIUS
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        radius = savedInstanceState?.getInt(KEY_RADIUS, DEFAULT_RADIUS) ?: DEFAULT_RADIUS
+
         val status = TextView(this).apply {
             setTextColor(Color.WHITE)
             setBackgroundColor(0xCC000000.toInt())
@@ -23,14 +27,17 @@ class MainActivity : Activity() {
             text = "VulkanBlur: waiting for surface…"
         }
         val blurView = VulkanBlurView(this).apply {
+            blurRadius = radius.toFloat()
             onStatus = { status.text = it }
         }
         val slider = SeekBar(this).apply {
             max = 64
-            progress = 24
+            progress = radius
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
-                    if (fromUser) blurView.blurRadius = progress.coerceAtLeast(1).toFloat()
+                    if (!fromUser) return
+                    radius = progress.coerceAtLeast(1)
+                    blurView.blurRadius = radius.toFloat()
                 }
                 override fun onStartTrackingTouch(seekBar: SeekBar) {}
                 override fun onStopTrackingTouch(seekBar: SeekBar) {}
@@ -64,5 +71,15 @@ class MainActivity : Activity() {
                 },
             )
         })
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putInt(KEY_RADIUS, radius)
+    }
+
+    private companion object {
+        const val KEY_RADIUS = "blur_radius"
+        const val DEFAULT_RADIUS = 24
     }
 }

@@ -57,7 +57,13 @@ class VulkanBlurView @JvmOverloads constructor(
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
+        // Keep device/pipelines; only drop the window + swapchain.
+        blur.releaseSurface()
+    }
+
+    override fun onDetachedFromWindow() {
         blur.detach()
+        super.onDetachedFromWindow()
     }
 
     private fun applyRadius() {

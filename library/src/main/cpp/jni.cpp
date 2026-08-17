@@ -32,6 +32,33 @@ Java_com_vulkanfx_blur_VulkanBlur_nativeCreate(JNIEnv* env, jobject, jobject sur
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_vulkanfx_blur_VulkanBlur_nativeSetSurface(JNIEnv* env, jobject, jlong handle, jobject surface) {
+    VulkanContext* ctx = fromHandle(handle);
+    if (!ctx) {
+        throwState(env, "native handle is null");
+        return;
+    }
+    ANativeWindow* window = ANativeWindow_fromSurface(env, surface);
+    if (!window) {
+        throwState(env, "ANativeWindow_fromSurface failed");
+        return;
+    }
+    if (!ctx->setSurface(window)) {
+        throwState(env, ctx->lastError().empty() ? "setSurface failed" : ctx->lastError().c_str());
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_vulkanfx_blur_VulkanBlur_nativeReleaseSurface(JNIEnv* env, jobject, jlong handle) {
+    VulkanContext* ctx = fromHandle(handle);
+    if (!ctx) {
+        throwState(env, "native handle is null");
+        return;
+    }
+    ctx->releaseSurface();
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_vulkanfx_blur_VulkanBlur_nativeResize(JNIEnv* env, jobject, jlong handle, jint width, jint height) {
     VulkanContext* ctx = fromHandle(handle);
     if (!ctx) {

@@ -65,28 +65,38 @@ void checkRadiusMap() {
 
 }  // namespace
 
-void KawaseBlur::destroy() {
+void KawaseBlur::destroyPyramid() {
     if (device_ == VK_NULL_HANDLE) return;
-    if (upPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, upPipeline_, nullptr);
-    if (downPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, downPipeline_, nullptr);
-    if (pipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
-    if (descPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(device_, descPool_, nullptr);
-    if (setLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device_, setLayout_, nullptr);
-    if (sampler_ != VK_NULL_HANDLE) vkDestroySampler(device_, sampler_, nullptr);
+    if (descPool_ != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(device_, descPool_, nullptr);
+        descPool_ = VK_NULL_HANDLE;
+    }
     for (auto& img : upImages_) img.destroy();
     for (auto& img : downImages_) img.destroy();
     upImages_.clear();
     downImages_.clear();
     downSets_.clear();
     upSets_.clear();
+}
+
+void KawaseBlur::destroy() {
+    if (device_ == VK_NULL_HANDLE) return;
+    destroyPyramid();
+    if (upPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, upPipeline_, nullptr);
+    if (downPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, downPipeline_, nullptr);
+    if (pipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
+    if (setLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device_, setLayout_, nullptr);
+    if (sampler_ != VK_NULL_HANDLE) vkDestroySampler(device_, sampler_, nullptr);
     upPipeline_ = VK_NULL_HANDLE;
     downPipeline_ = VK_NULL_HANDLE;
     pipelineLayout_ = VK_NULL_HANDLE;
-    descPool_ = VK_NULL_HANDLE;
     setLayout_ = VK_NULL_HANDLE;
     sampler_ = VK_NULL_HANDLE;
     cmdBarrier2_ = nullptr;
+    physical_ = VK_NULL_HANDLE;
     device_ = VK_NULL_HANDLE;
+    srcW_ = srcH_ = 0;
+    radius_ = 0.0f;
 }
 
 bool KawaseBlur::createComputePipeline(const uint32_t* spv, size_t bytes, VkPipeline* out,
@@ -139,22 +149,11 @@ void KawaseBlur::writeSet(VkDescriptorSet set, VkImageView src, VkImageView dst)
     vkUpdateDescriptorSets(device_, 2, writes, 0, nullptr);
 }
 
-bool KawaseBlur::create(VkDevice device, VkPhysicalDevice physical, const VulkanImage& src,
-                        float radius, PFN_vkCmdPipelineBarrier2 cmdBarrier2, std::string* error) {
-    destroy();
-    checkRadiusMap();
-    const KawaseMapped mapped = mapRadius(radius, std::min(src.width, src.height));
-    const uint32_t passes = mapped.passes;
-    device_ = device;
-    physical_ = physical;
-    cmdBarrier2_ = cmdBarrier2;
-    srcW_ = src.width;
-    srcH_ = src.height;
-    radius_ = radius;
-    offset_ = mapped.offset;
+bool KawaseBlur::ensurePipelines(std::string* error) {
+    if (downPipeline_ != VK_NULL_HANDLE) return true;
 
     VkFormatProperties fmt{};
-    vkGetPhysicalDeviceFormatProperties(physical, VK_FORMAT_R8G8B8A8_UNORM, &fmt);
+    vkGetPhysicalDeviceFormatProperties(physical_, VK_FORMAT_R8G8B8A8_UNORM, &fmt);
     if ((fmt.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) == 0) {
         if (error) *error = "R8G8B8A8_UNORM lacks linear sampled image";
         LOGE("R8G8B8A8_UNORM lacks linear sampled image");
@@ -164,29 +163,6 @@ bool KawaseBlur::create(VkDevice device, VkPhysicalDevice physical, const Vulkan
         if (error) *error = "R8G8B8A8_UNORM lacks STORAGE_IMAGE";
         LOGE("R8G8B8A8_UNORM lacks STORAGE_IMAGE");
         return false;
-    }
-
-    const VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    downImages_.resize(passes);
-    uint32_t w = srcW_;
-    uint32_t h = srcH_;
-    for (uint32_t i = 0; i < passes; ++i) {
-        w = std::max(1u, w / 2);
-        h = std::max(1u, h / 2);
-        if (!downImages_[i].create(device_, physical, w, h, VK_FORMAT_R8G8B8A8_UNORM, usage, error)) {
-            return false;
-        }
-    }
-    upImages_.resize(passes);
-    w = downImages_.back().width;
-    h = downImages_.back().height;
-    for (uint32_t i = 0; i < passes; ++i) {
-        w *= 2;
-        h *= 2;
-        if (!upImages_[i].create(device_, physical, w, h, VK_FORMAT_R8G8B8A8_UNORM, usage, error)) {
-            return false;
-        }
     }
 
     VkSamplerCreateInfo sci{};
@@ -229,6 +205,43 @@ bool KawaseBlur::create(VkDevice device, VkPhysicalDevice physical, const Vulkan
 
     if (!createComputePipeline(kDownSpv, sizeof(kDownSpv), &downPipeline_, error)) return false;
     if (!createComputePipeline(kUpSpv, sizeof(kUpSpv), &upPipeline_, error)) return false;
+    return true;
+}
+
+bool KawaseBlur::rebuildPyramid(const VulkanImage& src, uint32_t passes, std::string* error) {
+    destroyPyramid();
+    srcW_ = src.width;
+    srcH_ = src.height;
+
+    const VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    downImages_.resize(passes);
+    uint32_t w = srcW_;
+    uint32_t h = srcH_;
+    for (uint32_t i = 0; i < passes; ++i) {
+        w = std::max(1u, w / 2);
+        h = std::max(1u, h / 2);
+        if (!downImages_[i].create(device_, physical_, w, h, VK_FORMAT_R8G8B8A8_UNORM, usage, error)) {
+            return false;
+        }
+    }
+    upImages_.resize(passes);
+    for (uint32_t i = 0; i < passes; ++i) {
+        uint32_t outW;
+        uint32_t outH;
+        if (i + 1 == passes) {
+            // Exact source size — doubling alone loses a pixel on odd dims (581→290→580).
+            outW = srcW_;
+            outH = srcH_;
+        } else {
+            const VulkanImage& prev = (i == 0) ? downImages_.back() : upImages_[i - 1];
+            outW = prev.width * 2;
+            outH = prev.height * 2;
+        }
+        if (!upImages_[i].create(device_, physical_, outW, outH, VK_FORMAT_R8G8B8A8_UNORM, usage, error)) {
+            return false;
+        }
+    }
 
     VkDescriptorPoolSize poolSizes[2]{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -261,8 +274,22 @@ bool KawaseBlur::create(VkDevice device, VkPhysicalDevice physical, const Vulkan
         const VulkanImage& in = (i == 0) ? downImages_.back() : upImages_[i - 1];
         writeSet(upSets_[i], in.view, upImages_[i].view);
     }
-    LOGI("kawase radius=%.1f passes=%u offset=%.2f", radius_, passes, offset_);
+    LOGI("kawase rebuild %ux%u passes=%u offset=%.2f", srcW_, srcH_, passes, offset_);
     return true;
+}
+
+bool KawaseBlur::create(VkDevice device, VkPhysicalDevice physical, const VulkanImage& src,
+                        float radius, PFN_vkCmdPipelineBarrier2 cmdBarrier2, std::string* error) {
+    destroy();
+    checkRadiusMap();
+    device_ = device;
+    physical_ = physical;
+    cmdBarrier2_ = cmdBarrier2;
+    radius_ = radius;
+    const KawaseMapped mapped = mapRadius(radius, std::min(src.width, src.height));
+    offset_ = mapped.offset;
+    if (!ensurePipelines(error)) return false;
+    return rebuildPyramid(src, mapped.passes, error);
 }
 
 bool KawaseBlur::setRadius(float radius, const VulkanImage& src, std::string* error) {
@@ -271,12 +298,23 @@ bool KawaseBlur::setRadius(float radius, const VulkanImage& src, std::string* er
         return false;
     }
     const KawaseMapped mapped = mapRadius(radius, std::min(src.width, src.height));
+    radius_ = radius;
+    offset_ = mapped.offset;
     if (mapped.passes == downImages_.size() && src.width == srcW_ && src.height == srcH_) {
-        radius_ = radius;
-        offset_ = mapped.offset;
         return true;
     }
-    return create(device_, physical_, src, radius, cmdBarrier2_, error);
+    return rebuildPyramid(src, mapped.passes, error);
+}
+
+bool KawaseBlur::resize(const VulkanImage& src, std::string* error) {
+    if (device_ == VK_NULL_HANDLE) {
+        if (error) *error = "KawaseBlur::resize before create";
+        return false;
+    }
+    if (src.width == srcW_ && src.height == srcH_) return true;
+    const KawaseMapped mapped = mapRadius(radius_, std::min(src.width, src.height));
+    offset_ = mapped.offset;
+    return rebuildPyramid(src, mapped.passes, error);
 }
 
 bool KawaseBlur::execute(VkCommandBuffer cmd, VkQueue queue, std::string* error) {

@@ -19,6 +19,8 @@ public:
     std::string info() const;
     bool resize(uint32_t width, uint32_t height);
     bool setRadius(float radius);
+    void releaseSurface();
+    bool setSurface(ANativeWindow* window);
     const std::string& lastError() const { return error_; }
 
 private:
@@ -33,8 +35,9 @@ private:
     bool createSyncObjects();
     bool createSwapchain();
     void destroySwapchain();
-    bool createTestTexture();
+    bool createTestTexture(uint32_t w, uint32_t h);
     bool uploadTestTexture();
+    bool ensureWorkingResources();
     bool presentTest();
     void barrierImage(VkCommandBuffer cmd, VkImage image,
                       VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess, VkImageLayout oldLayout,
@@ -60,6 +63,7 @@ private:
     std::vector<VkImage> swapchainImages_;
     VulkanImage testImage_;
     KawaseBlur blur_;
+    float radius_ = 24.0f;
     PFN_vkCmdPipelineBarrier2 cmdBarrier2_ = nullptr;
     VkPhysicalDeviceProperties props_{};
     uint32_t instanceApi_ = VK_API_VERSION_1_1;
