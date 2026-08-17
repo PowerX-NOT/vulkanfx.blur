@@ -95,8 +95,7 @@ const char* presentModeName(VkPresentModeKHR m) {
     }
 }
 
-constexpr uint32_t kTestCell = 32;
-// ponytail: cap work edge so rotate doesn't re-upload a full 4K checker every time.
+// ponytail: cap work edge so huge bitmap uploads don't OOM staging.
 constexpr uint32_t kMaxWorkEdge = 1280;
 
 VkExtent2D workExtentFor(VkExtent2D swap) {
@@ -227,7 +226,6 @@ bool VulkanContext::init(ANativeWindow* window, bool enableValidation) {
     if (!createSwapchain()) return false;
     if (swapchainExtent_.width > 0 && swapchainExtent_.height > 0) {
         if (!ensureWorkingResources()) return false;
-        if (!presentTest()) return false;
     }
     LOGI("%s", info().c_str());
     return true;
@@ -487,21 +485,14 @@ bool VulkanContext::rebuildBlurFromInput() {
 }
 
 bool VulkanContext::ensureWorkingResources() {
-    if (!useChecker_) {
-        if (inputImage_.image == VK_NULL_HANDLE) return false;
-        if (blur_.passes() == 0) return rebuildBlurFromInput();
-        return true;
-    }
-    const VkExtent2D work = workExtentFor(swapchainExtent_);
-    const bool sizeChanged = inputImage_.image == VK_NULL_HANDLE ||
-                             inputImage_.width != work.width || inputImage_.height != work.height;
-    if (sizeChanged) {
-        if (!createInputImage(work.width, work.height)) return false;
-        if (!uploadChecker()) return false;
-        return rebuildBlurFromInput();
-    }
+    if (inputImage_.image == VK_NULL_HANDLE) return true;
     if (blur_.passes() == 0) return rebuildBlurFromInput();
     return true;
+}
+
+bool VulkanContext::tryPresent() {
+    if (inputImage_.image == VK_NULL_HANDLE || blur_.passes() == 0) return true;
+    return presentFrame();
 }
 
 bool VulkanContext::uploadInputRgba(const uint8_t* rgba) {
@@ -554,29 +545,6 @@ bool VulkanContext::uploadInputRgba(const uint8_t* rgba) {
     return true;
 }
 
-bool VulkanContext::uploadChecker() {
-    const VkDeviceSize bytes = static_cast<VkDeviceSize>(inputImage_.width) * inputImage_.height * 4;
-    std::vector<uint8_t> rgba(static_cast<size_t>(bytes));
-    for (uint32_t y = 0; y < inputImage_.height; ++y) {
-        for (uint32_t x = 0; x < inputImage_.width; ++x) {
-            const bool on = ((x / kTestCell) + (y / kTestCell)) % 2 == 0;
-            uint8_t* p = rgba.data() + (static_cast<size_t>(y) * inputImage_.width + x) * 4;
-            if (on) {
-                p[0] = 255;
-                p[1] = 64;
-                p[2] = 160;
-                p[3] = 255;
-            } else {
-                p[0] = 32;
-                p[1] = 200;
-                p[2] = 220;
-                p[3] = 255;
-            }
-        }
-    }
-    return uploadInputRgba(rgba.data());
-}
-
 bool VulkanContext::setInputRgba(const uint8_t* rgba, uint32_t width, uint32_t height) {
     if (!rgba || width == 0 || height == 0) {
         error_ = "setInputRgba: empty input";
@@ -589,7 +557,6 @@ bool VulkanContext::setInputRgba(const uint8_t* rgba, uint32_t width, uint32_t h
         return false;
     }
     vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX);
-    useChecker_ = false;
     if (!createInputImage(width, height)) return false;
     if (!uploadInputRgba(rgba)) return false;
     return rebuildBlurFromInput();
@@ -601,7 +568,7 @@ bool VulkanContext::createSwapchain() {
     VkSurfaceCapabilitiesKHR caps{};
     VK_TRY(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_, surface_, &caps));
     if ((caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0) {
-        error_ = "swapchain does not support TRANSFER_DST (needed to blit the test image)";
+        error_ = "swapchain does not support TRANSFER_DST (needed to blit blur output)";
         LOGE("%s", error_.c_str());
         return false;
     }
@@ -710,7 +677,7 @@ void VulkanContext::destroySwapchain() {
     swapchainExtent_ = {};
 }
 
-bool VulkanContext::presentTest() {
+bool VulkanContext::presentFrame() {
     if (swapchain_ == VK_NULL_HANDLE || swapchainImages_.empty()) return true;
 
     // Wait for the previous frame's GPU work, then read timestamps (pipelined frame loop).
@@ -817,7 +784,7 @@ bool VulkanContext::resize(uint32_t width, uint32_t height) {
     if (swapchainExtent_.width == 0 || swapchainExtent_.height == 0) return true;
     // Always re-check work size: present OUT_OF_DATE can update swapchain before surfaceChanged.
     if (!ensureWorkingResources()) return false;
-    return presentTest();
+    return tryPresent();
 }
 
 void VulkanContext::releaseSurface() {
@@ -844,7 +811,7 @@ bool VulkanContext::setSurface(ANativeWindow* window) {
     if (!createSwapchain()) return false;
     if (swapchainExtent_.width == 0 || swapchainExtent_.height == 0) return true;
     if (!ensureWorkingResources()) return false;
-    return presentTest();
+    return tryPresent();
 }
 
 bool VulkanContext::setRadius(float radius) {
@@ -866,7 +833,7 @@ bool VulkanContext::render() {
         error_ = "render before working resources";
         return false;
     }
-    return presentTest();
+    return presentFrame();
 }
 
 std::string VulkanContext::info() const {
@@ -931,7 +898,7 @@ std::string VulkanContext::info() const {
     s += std::to_string(inputImage_.width);
     s += "x";
     s += std::to_string(inputImage_.height);
-    s += useChecker_ ? " R8G8B8A8 checker\n" : " R8G8B8A8 bitmap\n";
+    s += inputImage_.image != VK_NULL_HANDLE ? " R8G8B8A8\n" : " none\n";
     s += "radius=";
     s += std::to_string(blur_.radius());
     s += "\n";

@@ -1,3 +1,11 @@
 <resources>
-    <string name="app_name">Blur</string>
+    <string name="app_name">Vulkan Blur Demo</string>
+    <string name="hud_title">Blur radius</string>
+    <string name="radius_value">%1$d px</string>
+    <string name="timing_placeholder">GPU timing…</string>
+    <string name="timing_value">down %1$s ms · up %2$s ms · total %3$s ms</string>
+    <string name="control_radius">Radius (matches AOSP window blur scale)</string>
+    <string name="show_debug">Show pyramid debug</string>
+    <string name="debug_level_hint">Pyramid level (0 = final blur)</string>
+    <string name="show_device_info">Show device info</string>
 </resources>

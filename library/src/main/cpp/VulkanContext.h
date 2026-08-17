@@ -44,10 +44,10 @@ private:
     void destroySwapchain();
     bool createInputImage(uint32_t w, uint32_t h);
     bool uploadInputRgba(const uint8_t* rgba);
-    bool uploadChecker();
     bool rebuildBlurFromInput();
     bool ensureWorkingResources();
-    bool presentTest();
+    bool presentFrame();
+    bool tryPresent();
     void barrierImage(VkCommandBuffer cmd, VkImage image,
                       VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess, VkImageLayout oldLayout,
                       VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess, VkImageLayout newLayout);
@@ -74,7 +74,6 @@ private:
     VulkanImage inputImage_;
     KawaseBlur blur_;
     float radius_ = 24.0f;
-    bool useChecker_ = true;
     PFN_vkCmdPipelineBarrier2 cmdBarrier2_ = nullptr;
     VkPhysicalDeviceProperties props_{};
     uint32_t instanceApi_ = VK_API_VERSION_1_1;

@@ -6,13 +6,14 @@ import android.view.Surface
 /**
  * Kotlin entry point for the Vulkan Dual Kawase blur engine.
  *
- * Typical SurfaceView host:
- *   attach(surface) → setInputBitmap / setBlurRadius → render() → detach()
+ * Call [setInputBitmap] before [render]. Typical SurfaceView flow:
+ *   attach(surface) → setInputBitmap → render() each frame → detach()
  */
 class VulkanBlur {
     private var handle: Long = 0
     private var pendingRadius: Float = 24f
     private var pendingBitmap: Bitmap? = null
+    private var inputReady = false
 
     @Synchronized
     fun attach(surface: Surface, enableValidation: Boolean = false): String {
@@ -57,6 +58,7 @@ class VulkanBlur {
     @Synchronized
     fun setInputBitmap(bitmap: Bitmap) {
         require(bitmap.config == Bitmap.Config.ARGB_8888) { "ARGB_8888 required" }
+        inputReady = true
         if (handle == 0L) {
             pendingBitmap = bitmap
             return
@@ -64,10 +66,10 @@ class VulkanBlur {
         nativeSetInputBitmap(handle, bitmap)
     }
 
-    /** Re-run Dual Kawase + present. No-op until [attach] has succeeded. */
+    /** Re-run Dual Kawase + present. Requires [hasInput] and a successful [attach]. */
     @Synchronized
     fun render() {
-        if (handle != 0L) nativeRender(handle)
+        if (handle != 0L && inputReady) nativeRender(handle)
     }
 
     @Synchronized
@@ -93,7 +95,12 @@ class VulkanBlur {
             handle = 0L
         }
         pendingBitmap = null
+        inputReady = false
     }
+
+    @get:Synchronized
+    val hasInput: Boolean
+        get() = inputReady
 
     @get:Synchronized
     val isReady: Boolean

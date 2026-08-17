@@ -1,89 +1,158 @@
 package com.vulkanfx.blur.demo
 
 import android.app.Activity
-import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.LinearGradient
-import android.graphics.Paint
-import android.graphics.Shader
 import android.graphics.Typeface
 import android.os.Bundle
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
+import android.widget.CompoundButton
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.SeekBar
+import android.widget.Switch
 import android.widget.TextView
 import com.vulkanfx.blur.VulkanBlurView
+import java.util.Locale
+import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
     private var radius = DEFAULT_RADIUS
     private var debugLevel = 0
+    private var showDebug = false
+    private var showDeviceInfo = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         radius = savedInstanceState?.getInt(KEY_RADIUS, DEFAULT_RADIUS) ?: DEFAULT_RADIUS
         debugLevel = savedInstanceState?.getInt(KEY_DEBUG, 0) ?: 0
+        showDebug = savedInstanceState?.getBoolean(KEY_SHOW_DEBUG, false) ?: false
+        showDeviceInfo = savedInstanceState?.getBoolean(KEY_SHOW_INFO, false) ?: false
 
-        val status = TextView(this).apply {
+        val radiusValue = TextView(this).apply {
             setTextColor(Color.WHITE)
-            setBackgroundColor(0xCC000000.toInt())
-            textSize = 12f
-            setPadding(32, 48, 32, 32)
-            typeface = Typeface.MONOSPACE
-            text = "VulkanBlur: waiting for surface…"
+            textSize = 15f
+            typeface = Typeface.DEFAULT_BOLD
         }
-        val scene = makeSceneBitmap()
+        val timingChip = TextView(this).apply {
+            setTextColor(0xFFB8FFB8.toInt())
+            textSize = 12f
+            typeface = Typeface.MONOSPACE
+            text = getString(R.string.timing_placeholder)
+        }
+        val hud = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundResource(R.drawable.hud_chip)
+            setPadding(40, 28, 40, 28)
+            addView(TextView(context).apply {
+                text = getString(R.string.hud_title)
+                setTextColor(0x99FFFFFF.toInt())
+                textSize = 11f
+            })
+            addView(radiusValue)
+            addView(timingChip)
+        }
+
+        val deviceInfo = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            setBackgroundResource(R.drawable.hud_chip)
+            textSize = 10f
+            typeface = Typeface.MONOSPACE
+            setPadding(32, 24, 32, 24)
+            visibility = if (showDeviceInfo) View.VISIBLE else View.GONE
+        }
+
         val blurView = VulkanBlurView(this, blurRadius = radius.toFloat()).apply {
             this.debugLevel = debugLevel
-            onStatus = { status.text = it }
-            setInputBitmap(scene)
+            setInputBitmap(DemoScene.wallpaper())
+            onFrameStats = { down, up, total ->
+                timingChip.text = formatTiming(down, up, total)
+            }
+            onStatus = { deviceInfo.text = it }
         }
+
+        fun refreshRadiusLabel() {
+            radiusValue.text = getString(R.string.radius_value, radius)
+        }
+        refreshRadiusLabel()
+
         val radiusSlider = SeekBar(this).apply {
             max = 64
             progress = radius
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                     if (!fromUser) return
                     radius = progress.coerceAtLeast(1)
+                    refreshRadiusLabel()
                     blurView.blurRadius = radius.toFloat()
                 }
-                override fun onStartTrackingTouch(seekBar: SeekBar) {}
-                override fun onStopTrackingTouch(seekBar: SeekBar) {}
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {}
             })
         }
-        // 0 = final, 1..6 = downsample levels (clamped to current pass count in native).
+
+        val debugPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = if (showDebug) View.VISIBLE else View.GONE
+        }
         val debugSlider = SeekBar(this).apply {
             max = 6
             progress = debugLevel
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                     if (!fromUser) return
                     debugLevel = progress
                     blurView.debugLevel = progress
                 }
-                override fun onStartTrackingTouch(seekBar: SeekBar) {}
-                override fun onStopTrackingTouch(seekBar: SeekBar) {}
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {}
             })
         }
+        debugPanel.addView(TextView(this).apply {
+            text = getString(R.string.debug_level_hint)
+            setTextColor(0x99FFFFFF.toInt())
+            textSize = 12f
+        })
+        debugPanel.addView(debugSlider)
+
         val controls = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0x88000000.toInt())
-            setPadding(32, 16, 32, 16)
+            setBackgroundResource(R.drawable.panel_background)
+            setPadding(40, 32, 40, 48)
             addView(TextView(context).apply {
-                text = "radius"
-                setTextColor(Color.LTGRAY)
-                textSize = 11f
+                text = getString(R.string.control_radius)
+                setTextColor(Color.WHITE)
+                textSize = 14f
+                typeface = Typeface.DEFAULT_BOLD
             })
             addView(radiusSlider)
-            addView(TextView(context).apply {
-                text = "debugLevel (0=final)"
-                setTextColor(Color.LTGRAY)
-                textSize = 11f
+            addView(Switch(context).apply {
+                text = getString(R.string.show_debug)
+                setTextColor(Color.WHITE)
+                isChecked = showDebug
+                setOnCheckedChangeListener { _: CompoundButton, checked: Boolean ->
+                    showDebug = checked
+                    debugPanel.visibility = if (checked) View.VISIBLE else View.GONE
+                    if (!checked) {
+                        debugLevel = 0
+                        debugSlider.progress = 0
+                        blurView.debugLevel = 0
+                    }
+                }
             })
-            addView(debugSlider)
+            addView(debugPanel)
+            addView(Switch(context).apply {
+                text = getString(R.string.show_device_info)
+                setTextColor(Color.WHITE)
+                isChecked = showDeviceInfo
+                setOnCheckedChangeListener { _: CompoundButton, checked: Boolean ->
+                    showDeviceInfo = checked
+                    deviceInfo.visibility = if (checked) View.VISIBLE else View.GONE
+                }
+            })
         }
+
         setContentView(FrameLayout(this).apply {
             addView(
                 blurView,
@@ -93,11 +162,24 @@ class MainActivity : Activity() {
                 ),
             )
             addView(
-                status,
+                hud,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply {
+                    gravity = Gravity.TOP or Gravity.START
+                    setMargins(32, 48, 32, 0)
+                },
+            )
+            addView(
+                deviceInfo,
                 FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
-                ),
+                ).apply {
+                    gravity = Gravity.TOP or Gravity.END
+                    setMargins(32, 160, 32, 0)
+                },
             )
             addView(
                 controls,
@@ -113,47 +195,26 @@ class MainActivity : Activity() {
         super.onSaveInstanceState(outState)
         outState.putInt(KEY_RADIUS, radius)
         outState.putInt(KEY_DEBUG, debugLevel)
+        outState.putBoolean(KEY_SHOW_DEBUG, showDebug)
+        outState.putBoolean(KEY_SHOW_INFO, showDeviceInfo)
+    }
+
+    private fun formatTiming(downMs: Float, upMs: Float, totalMs: Float): String {
+        if (totalMs < 0f) return getString(R.string.timing_placeholder)
+        fun fmt(v: Float) = String.format(Locale.US, "%.2f", v)
+        return getString(
+            R.string.timing_value,
+            fmt(downMs),
+            fmt(upMs),
+            fmt(totalMs),
+        )
     }
 
     private companion object {
         const val KEY_RADIUS = "blur_radius"
         const val KEY_DEBUG = "debug_level"
+        const val KEY_SHOW_DEBUG = "show_debug"
+        const val KEY_SHOW_INFO = "show_device_info"
         const val DEFAULT_RADIUS = 24
-
-        /** Simple high-contrast scene under the 1280 work-edge cap. */
-        fun makeSceneBitmap(): Bitmap {
-            val w = 720
-            val h = 1280
-            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-            val c = Canvas(bmp)
-            c.drawRect(
-                0f, 0f, w.toFloat(), h.toFloat(),
-                Paint().apply {
-                    shader = LinearGradient(
-                        0f, 0f, w.toFloat(), h.toFloat(),
-                        intArrayOf(0xFF1A237E.toInt(), 0xFF00897B.toInt(), 0xFFFF8F00.toInt()),
-                        null,
-                        Shader.TileMode.CLAMP,
-                    )
-                },
-            )
-            val circle = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFE91E63.toInt() }
-            c.drawCircle(w * 0.35f, h * 0.32f, 180f, circle)
-            circle.color = 0xFF76FF03.toInt()
-            c.drawCircle(w * 0.68f, h * 0.48f, 140f, circle)
-            circle.color = 0xFF00BCD4.toInt()
-            c.drawCircle(w * 0.5f, h * 0.7f, 200f, circle)
-            c.drawText(
-                "VulkanBlur",
-                w * 0.12f,
-                h * 0.18f,
-                Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = Color.WHITE
-                    textSize = 96f
-                    typeface = Typeface.DEFAULT_BOLD
-                },
-            )
-            return bmp
-        }
     }
 }

@@ -13,7 +13,7 @@ import android.view.SurfaceView
 /**
  * SurfaceView host for [VulkanBlur].
  *
- *     VulkanBlurView(context).apply { blurRadius = 24f }
+ * Provide content with [setInputBitmap] before the first frame is drawn.
  */
 class VulkanBlurView @JvmOverloads constructor(
     context: Context,
@@ -21,6 +21,8 @@ class VulkanBlurView @JvmOverloads constructor(
 ) : SurfaceView(context, attrs), SurfaceHolder.Callback {
 
     var onStatus: ((String) -> Unit)? = null
+    /** Called each frame with GPU timing in ms (-1 if unavailable). */
+    var onFrameStats: ((downMs: Float, upMs: Float, totalMs: Float) -> Unit)? = null
 
     var blurRadius: Float = 24f
         set(value) {
@@ -51,9 +53,10 @@ class VulkanBlurView @JvmOverloads constructor(
     private var frameScheduled = false
     private val frameCallback = Choreographer.FrameCallback {
         frameScheduled = false
-        if (!blur.isReady) return@FrameCallback
+        if (!blur.isReady || !blur.hasInput) return@FrameCallback
         try {
             blur.render()
+            onFrameStats?.invoke(blur.downsampleMs, blur.upsampleMs, blur.totalMs)
             onStatus?.invoke(blur.info())
         } catch (e: IllegalStateException) {
             Log.e(TAG, "Vulkan render failed", e)
@@ -85,7 +88,7 @@ class VulkanBlurView @JvmOverloads constructor(
     }
 
     fun requestRender() {
-        if (frameScheduled || !blur.isReady) return
+        if (frameScheduled || !blur.isReady || !blur.hasInput) return
         frameScheduled = true
         Choreographer.getInstance().postFrameCallback(frameCallback)
     }
